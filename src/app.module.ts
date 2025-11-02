@@ -11,6 +11,8 @@ import { Class } from './classModule/class.entity';
 import { Question } from './QuestionModule/question.entity';
 import { Exam } from './examModule/exam.entity';
 import { ConfigModule } from '@nestjs/config';
+import { Result } from './resultModule/result.entity';
+import { ResultModule } from './resultModule';
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -23,13 +25,14 @@ import { ConfigModule } from '@nestjs/config';
       username: 'root',
       password: '',
       database: 'CBTDB',
-      entities: [Subject, Class, Question, Exam],
+      entities: [Subject, Class, Question, Exam, Result],
     }),
     CommonModule,
     SubjectModule,
     ClassModule,
     QuestionModule,
     ExamModule,
+    ResultModule,
   ],
 })
 export class AppModule {}

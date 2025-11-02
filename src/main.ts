@@ -7,7 +7,7 @@ async function bootstrap() {
   app.enableCors({
     origin: [
       'http://localhost:3000', // React local dev
-      'http://10.77.189.170:3000', // LAN access if you're testing via IP
+      'http://192.168.0.173:3000', // LAN access if you're testing via IP
     ],
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
     credentials: true, // if you plan to use cookies or auth later

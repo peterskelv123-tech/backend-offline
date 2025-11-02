@@ -29,9 +29,9 @@ async getExams(@Query('page') page?: number) {
   }
 }
 @Get('take')
-async takeExam(@Query('className') className: string) {
+async takeExam(@Query('className') className: string,@Query('regNo') regNo: string) {
   try {
-    const exam = await this.examService.TakeAnExam(className);
+    const exam = await this.examService.TakeAnExam(className, regNo);
     return this.responseService.success(
       exam,
       'Exam retrieved successfully',

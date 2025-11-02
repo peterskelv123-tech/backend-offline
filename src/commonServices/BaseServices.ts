@@ -1,27 +1,56 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
+/* eslint-disable @typescript-eslint/no-unsafe-return */
+/* eslint-disable prettier/prettier */
 // eslint-disable-next-line prettier/prettier
-import { DeepPartial, ObjectLiteral, Repository,ILike } from "typeorm";
+import { DeepPartial, ObjectLiteral, Repository,ILike,EntityManager,DataSource } from "typeorm";
 import { DatabaseHealthService } from './database-health.service';
 
 export abstract class BaseService<T extends ObjectLiteral> {
   constructor(
     protected readonly repository: Repository<T>,
     protected readonly dbHealth: DatabaseHealthService,
+    protected readonly dataSource: DataSource,
   ) {}
 
   /**
-   * Dynamically extract keys (column names) from an entity class.
-   * Works best when the class has default property values.
+   * Allow services to run inside a transaction when required.
    */
-  getKeysFromClass(entityClass: new () => T): string[] {
-    const instance = new entityClass();
-    return Object.keys(instance);
+  async transactional<R>(
+    work: (manager: EntityManager) => Promise<R>,
+  ): Promise<R> {
+    await this.dbHealth.ensureConnection();
+    return await this.dataSource.transaction(work);
   }
 
   /**
-   * Search by a single field using ILIKE (case-insensitive partial match).
-   * Limits results to 5 entries.
+   * Select the correct repository (normal or transactional).
    */
-  async searchByKey(key: string, keyword: string): Promise<T[]> {
+  protected getRepo(manager?: EntityManager) {
+    return manager
+      ? manager.getRepository(this.repository.target)
+      : this.repository;
+  }
+
+  async findOne(id: number, manager?: EntityManager): Promise<T | null> {
+    await this.dbHealth.ensureConnection();
+    return await this.getRepo(manager).findOneBy({ id } as any);
+  }
+
+  async create(data: DeepPartial<T>, manager?: EntityManager): Promise<T> {
+    await this.dbHealth.ensureConnection();
+    return await this.getRepo(manager).save(data);
+  }
+
+  async delete(id: number, manager?: EntityManager): Promise<void> {
+    await this.dbHealth.ensureConnection();
+    await this.getRepo(manager).delete(id);
+  }
+
+  async searchByKey(
+    key: string,
+    keyword: string,
+    manager?: EntityManager,
+  ): Promise<T[]> {
     const validColumns = this.repository.metadata.columns.map(
       (c) => c.propertyName,
     );
@@ -29,74 +58,38 @@ export abstract class BaseService<T extends ObjectLiteral> {
     if (!validColumns.includes(key)) {
       throw new Error(`Invalid search field: ${key}`);
     }
+
     await this.dbHealth.ensureConnection();
-    return await this.repository.find({
+
+    return await this.getRepo(manager).find({
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       where: { [key]: ILike(`%${keyword}%`) } as any,
       take: 5,
     });
   }
-
-  /**
-   * Perform a keyword search across all entity fields.
-   * Deduplicates results across multiple columns.
-   */
   async searchMethod(
-    entityClass: new () => T,
-    searchItem: string,
-  ): Promise<T[]> {
-    const keys = this.getKeysFromClass(entityClass);
+  entityClass: new () => T,
+  keyword: string,
+  manager?: EntityManager,
+): Promise<T[]> {
+  const repo = this.getRepo(manager);
 
-    // Run all searches in parallel
-    const allResults = await Promise.all(
-      keys.map((key) => this.searchByKey(key, searchItem)),
-    );
+  // ✅ Extract all property keys
+  const keys = Object.keys(new entityClass());
 
-    // Flatten nested arrays of results
-    const merged = allResults.flat();
+  // ✅ Run all searches in parallel
+  const allResults = await Promise.all(
+    keys.map((key) => this.searchByKey(key, keyword, manager)),
+  );
 
-    // Deduplicate results (based on full object)
-    const uniqueResults = Array.from(
-      new Set(merged.map((r) => JSON.stringify(r))),
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-    ).map((str) => JSON.parse(str));
+  // ✅ Flatten nested arrays
+  const merged = allResults.flat();
 
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-    return uniqueResults;
-  }
+  // ✅ Deduplicate using JSON.stringify (simple + reliable)
+  const uniqueResults = Array.from(
+    new Set(merged.map((r) => JSON.stringify(r))),
+  ).map((str) => JSON.parse(str));
 
-  /**
-   * Find a single record by its ID.
-   */
-  async findOne(id: number): Promise<T | null> {
-    await this.dbHealth.ensureConnection();
-    return await this.repository.findOneBy({ id } as any);
-  }
-
-  /**
-   * Create and save a new entity record.
-   */
-  async create(data: DeepPartial<T>): Promise<T> {
-    await this.dbHealth.ensureConnection();
-    return await this.repository.save(data);
-  }
-  async getitemByName(name: string): Promise<T | null> {
-    if (
-      this.getKeysFromClass(this.repository.target as new () => T).includes(
-        'Name',
-      )
-    ) {
-      await this.dbHealth.ensureConnection();
-      return await this.repository.findOneBy({ Name: name } as any);
-    } else {
-      throw new Error(`Entity does not have a 'Name' field.`);
-    }
-  }
-  /**z
-   * Delete a record by ID.
-   */
-  async delete(id: number): Promise<void> {
-    await this.dbHealth.ensureConnection();
-    await this.repository.delete(id);
-  }
+  return uniqueResults;
+}
 }
