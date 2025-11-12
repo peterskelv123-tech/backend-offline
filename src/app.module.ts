@@ -13,6 +13,8 @@ import { Exam } from './examModule/exam.entity';
 import { ConfigModule } from '@nestjs/config';
 import { Result } from './resultModule/result.entity';
 import { ResultModule } from './resultModule';
+import { AppController } from './app.controller';
+import { AppService } from './app.service';
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -34,5 +36,8 @@ import { ResultModule } from './resultModule';
     ExamModule,
     ResultModule,
   ],
+  providers: [AppService],
+  exports: [AppService],
+  controllers: [AppController],
 })
 export class AppModule {}

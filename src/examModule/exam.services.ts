@@ -90,7 +90,7 @@ export class ExamServices extends BaseService<Exam> {
 
       // delete exam-related records
       await manager.delete(Question, { examId: examID });
-      await manager.delete(Result, { examId: examID });
+      await manager.delete(Result, { exam: { id: examID } });
 
       return { success: true };
     });
@@ -126,7 +126,6 @@ export class ExamServices extends BaseService<Exam> {
         subject,
         class: classEntity,
         status: false,
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         totalQuestions: examDetails.totalQuestions ?? 0,
       });
 
@@ -145,10 +144,8 @@ export class ExamServices extends BaseService<Exam> {
   async updateExamStatus(examId: number, status: boolean) {
     return await this.transactional(async (manager) => {
       const examRepo = manager.getRepository(Exam);
-
       const exam = await examRepo.findOne({ where: { id: examId } });
       if (!exam) throw new Error(`Exam with ID ${examId} not found.`);
-
       exam.status = status;
       return await examRepo.save(exam);
     });

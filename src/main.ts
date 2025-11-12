@@ -5,10 +5,7 @@ import { ValidationPipe } from '@nestjs/common';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.enableCors({
-    origin: [
-      'http://localhost:3000', // React local dev
-      'http://192.168.0.173:3000', // LAN access if you're testing via IP
-    ],
+    origin: '*',
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
     credentials: true, // if you plan to use cookies or auth later
   });
@@ -19,7 +16,8 @@ async function bootstrap() {
     }),
   );
   const port = process.env.PORT ?? 3000;
-  await app.listen(port);
+  await app.listen(port, '0.0.0.0');
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
   console.log(`Server running on port ${port}`);
 }
 bootstrap();
