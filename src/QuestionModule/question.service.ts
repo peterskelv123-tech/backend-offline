@@ -77,21 +77,19 @@ export class QuestionService extends BaseService<Question> {
 
     // Handle limit
     const maxQuestions = Number(exam.totalQuestions) || questions.length;
-
-    const selectedQuestions =
-      questions.length > maxQuestions
-        ? questions.slice(0, maxQuestions)
-        : questions;
-
+    if(maxQuestions>questions.length){
+      throw new Error(" question bank has to contain more or equal questions to what students are to answer")
+    }
+    
     // --- STEP 3: Save questions (transaction optional) ---
     await repo.save(
-      selectedQuestions.map((q) => ({
+      questions.map((q) => ({
         ...q,
         examId: exam.id,
       })),
     );
 
-    return selectedQuestions.length;
+    return questions.length;
   }
 
   /**

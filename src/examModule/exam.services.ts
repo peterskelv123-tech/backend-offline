@@ -83,18 +83,16 @@ export class ExamServices extends BaseService<Exam> {
   /**
    * ✅ Transactional delete: exams + questions + results
    */
-  async deleteAnExamEntry(examID: number) {
-    return await this.transactional(async (manager) => {
-      // delete main record
-      await this.delete(examID, manager);
+async deleteAnExamEntry(examID: number) {
+  return await this.transactional(async (manager) => {
+    await manager.delete(Question, { examId: examID });
+    await manager.delete(Result, { exam: { id: examID } });
+    await manager.delete(Exam, { id: examID });
+    return { success: true };
+  });
+}
 
-      // delete exam-related records
-      await manager.delete(Question, { examId: examID });
-      await manager.delete(Result, { exam: { id: examID } });
 
-      return { success: true };
-    });
-  }
 
   /**
    * ✅ Create exam + parse questions using transactional safety
