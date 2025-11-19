@@ -30,6 +30,21 @@ export class SubjectController {
       );
     }
   }
+  @Get()
+  async findAll() {
+    try {
+      const data = await this.subjectService.findAll();
+
+      if (!data.length) {
+        return this.response.error('No subjects in the database', 404);
+      }
+
+      return this.response.success(data, 'Subjects fetched successfully', 200);
+    } catch (error: any) {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      return this.response.error(error.message ?? 'Internal server error', 500);
+    }
+  }
   @Post('/')
   async addToSubject(@Body() subject: DeepPartial<Subject>) {
     try {

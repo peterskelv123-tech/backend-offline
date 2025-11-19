@@ -10,6 +10,7 @@ import { BaseService } from 'src/commonServices/BaseServices';
 import { DatabaseHealthService } from 'src/commonServices/database-health.service';
 import { Exam } from '../examModule/exam.entity'; // ✅ adjust path as needed
 import { ExamServices } from 'src/examModule/exam.services';
+import { RedisService } from 'src/commonServices/Redis.service';
 
 @Injectable()
 export class QuestionService extends BaseService<Question> {
@@ -19,7 +20,7 @@ export class QuestionService extends BaseService<Question> {
 
     @Inject(forwardRef(() => ExamServices))
     private readonly examService: ExamServices,
-
+    protected readonly redis:RedisService,
     protected readonly dbHealth: DatabaseHealthService,
     protected readonly dataSource: DataSource,
   ) {
@@ -152,24 +153,42 @@ export class QuestionService extends BaseService<Question> {
   /**
    * Get questions for exam taker (randomized).
    */
-  async examTakerQuestions(examId: number) {
-    const exam = await this.examService.findOne(examId);
-    if (!exam) throw new Error(`Exam with ID ${examId} not found.`);
-
-    const totalToPick = exam.totalQuestions ?? 0;
-    if (totalToPick <= 0) throw new Error('Invalid totalQuestions value.');
-
-    const questions = await this.repository
-      .createQueryBuilder('q')
-      .where('q.examId = :examId', { examId })
-      .orderBy('RAND()')
-      .limit(totalToPick)
-      .getMany();
-
-    return questions.map((q) => ({
-      id: q.id,
-      question: q.question,
-      options: q.options,
-    }));
+async examTakerQuestions(examId: number, studentId: string) {
+  const exam = await this.examService.findOne(examId);
+  if (!exam) throw new Error(`Exam with ID ${examId} not found.`);
+  const record = await this.redis.getProgress(studentId, examId);
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return
+  const alreadyTaken = new Set(record?.questionMeta.map((q) => q.id) ?? []);
+  const answeredCount = alreadyTaken.size;
+  const remainingToPick = exam.totalQuestions - answeredCount;
+  if (remainingToPick <= 0) {
+    // student has completed all questions — return all previously answered
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+    return record?.questionMeta ?? [];
   }
+
+  const allQuestions = await this.repository.find({
+    where: { examId },
+    select: ['id', 'question', 'options'],
+  });
+
+  const newQuestions = allQuestions.filter((q) => !alreadyTaken.has(q.id));
+
+  if (newQuestions.length < remainingToPick) {
+    throw new Error(
+      `Not enough remaining questions. Needed ${remainingToPick}, found ${newQuestions.length}`
+    );
+  }
+
+  // Shuffle new questions only
+  const shuffledNew = newQuestions
+    .map((q) => ({ sort: Math.random(), q }))
+    .sort((a, b) => a.sort - b.sort)
+    .slice(0, remainingToPick)
+    .map((i) => i.q);
+
+  // Combine previously answered + new shuffled questions
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+  return [...(record?.questionMeta ?? []), ...shuffledNew];
+}
 }

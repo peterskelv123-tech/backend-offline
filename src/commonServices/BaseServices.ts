@@ -45,7 +45,6 @@ export abstract class BaseService<T extends ObjectLiteral> {
     await this.dbHealth.ensureConnection();
     await this.getRepo(manager).delete(id);
   }
-
   async searchByKey(
     key: string,
     keyword: string,
@@ -91,5 +90,9 @@ export abstract class BaseService<T extends ObjectLiteral> {
   ).map((str) => JSON.parse(str));
 
   return uniqueResults;
+}
+async findAll(manager?: EntityManager): Promise<T[]> {
+  await this.dbHealth.ensureConnection();
+  return await this.getRepo(manager).find();
 }
 }

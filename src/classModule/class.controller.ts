@@ -29,6 +29,20 @@ export class ClassController {
       );
     }
   }
+  @Get()
+  async findAll() {
+    try {
+      const data = await this.classService.findAll();
+      if (!data.length) {
+        this.response.error('there is no class in the database', 404);
+      } else {
+        this.response.success(data, 'classes fetched successfully', 200);
+      }
+    } catch (error: any) {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access
+      this.response.error(error.message ?? 'internal server error', 500);
+    }
+  }
   @Post('/')
   async addToSubject(@Body() subject: DeepPartial<Class>) {
     try {
@@ -37,9 +51,8 @@ export class ClassController {
         subject.Name ?? '',
       );
       const exist = existingSubjects.length > 0;
-
       if (exist) {
-        return this.response.error('Subject already exists', 409); // 409 Conflict
+        return this.response.error('Class already exists', 409); // 409 Conflict
       }
 
       // ✅ 2. Create new subject

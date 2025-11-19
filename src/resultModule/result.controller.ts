@@ -1,5 +1,5 @@
 /* eslint-disable prettier/prettier */
-import { Body, Controller, Post } from "@nestjs/common";
+import { Body, Controller, Get, Post, Query } from "@nestjs/common";
 import { ResultService } from "./result.service";
 import { ResponseService } from "src/commonServices/response.services";
 import { StudentUploadDTO } from "src/DTO/studentUploadDTO";
@@ -30,4 +30,19 @@ export class ResultsController{
               );
         }
     }    
+    @Get()
+    async viewResult(@Query("className") className:string,@Query("subject") subject:string, @Query("examType") examType:string){
+    try {
+        const data=await this.resultServices.viewResult(className,subject,examType)
+        if (!data.length) {
+    return this.responseServices.error("result not yet available", 404);
+        }   
+        else{
+            return this.responseServices.success(data,"result fetched successfully",200)
+        }
+    } catch (error) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access
+        return this.responseServices.error(error.message??"internal server error",500)
+    }    
+    }
 }

@@ -8,13 +8,13 @@ import { DataSource, EntityManager, Repository } from 'typeorm';
 import { DatabaseHealthService } from 'src/commonServices/database-health.service';
 import { Question } from 'src/QuestionModule/question.entity';
 import { Exam } from 'src/examModule/exam.entity';
+import { ExpectedResultDTO } from 'src/DTO/createdExamDto';
 
 @Injectable()
 export class ResultService extends BaseService<Result> {
   constructor(
     @InjectRepository(Result)
     repo: Repository<Result>,
-
     protected readonly dbHealth: DatabaseHealthService,
 
     protected readonly dataSource: DataSource,
@@ -92,4 +92,40 @@ export class ResultService extends BaseService<Result> {
     // ✅ Step 7 — Save (transaction-safe)
     return await repo.save(result);
   }
+async viewResult(className: string, subject: string,examType:string): Promise<ExpectedResultDTO[]> {
+  // 1️⃣ Get exam for this class + subject
+    const examRef = await this.dataSource
+      .getRepository(Exam)
+      .createQueryBuilder('exam')
+      .leftJoinAndSelect('exam.class', 'class')
+      .leftJoinAndSelect('exam.subject', 'subject')
+      .where('class.name = :className', { className })
+      .andWhere('subject.name = :subject', { subject })
+      .andWhere('exam.examType = :examType', { examType }) 
+      .getOne();
+
+  if (!examRef) {
+    throw new Error(`No exam found for class ${className} and subject ${subject}`);
+  }
+  // 2️⃣ Get all results for this exam sorted by highest score
+  const results = await this.repository.find({
+    where: {
+      exam: { id: examRef.id },
+    },
+    order: {
+      score: "DESC",
+    },
+    relations: {
+      exam: true,
+    },
+  });
+
+  // 3️⃣ Map to ExpectedResultDTO
+  return results.map((r) => ({
+    examId: examRef.id,
+    regNo: r.regNo,
+    score: r.score,
+    highestScorePossible: examRef.totalQuestions,
+  }));
+}
 }

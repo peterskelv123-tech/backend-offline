@@ -41,13 +41,13 @@ async updateExamStatus(
     const data = await this.examService.updateExamStatus(examId, status);
 
     // ✅ If the exam is being deactivated (stopped)
-    if (!status) {
-      // 1. Broadcast to all students taking this exam (OPTION A)
-      this.attendanceGateway.forceStopByExamId(examId);
+    // if (!status) {
+    //   // 1. Broadcast to all students taking this exam (OPTION A)
+    //   this.attendanceGateway.forceStopByExamId(examId);
 
-      // 2. Remove all students for this exam from Redis
-      await this.redis.removeStudentsByExam(examId);
-    }
+    //   // 2. Remove all students for this exam from Redis
+    //   await this.redis.removeStudentsByExam(examId);
+    // }
 
     return this.responseService.success(
       data,

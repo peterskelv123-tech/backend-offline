@@ -9,9 +9,10 @@ export class QuestionController {
         private readonly responseService: ResponseService,
     ) {}
     @Get('/exam-taker')
-async examTakerQuestions(@Query('examId') examId: number) {
+async examTakerQuestions(@Query('examId') examId: number, @Query('studentId') studentId:string) {
   try {
-    const studentQuestions = await this.questionService.examTakerQuestions(examId);
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+    const studentQuestions = await this.questionService.examTakerQuestions(examId,studentId);
 
     // If the service returned successfully, we have questions
     return this.responseService.success(
