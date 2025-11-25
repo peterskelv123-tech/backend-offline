@@ -154,24 +154,33 @@ export class QuestionService extends BaseService<Question> {
    * Get questions for exam taker (randomized).
    */
 async examTakerQuestions(examId: number, studentId: string) {
+  // 1️⃣ Fetch the exam metadata
   const exam = await this.examService.findOne(examId);
   if (!exam) throw new Error(`Exam with ID ${examId} not found.`);
+
+  // 2️⃣ Fetch progress for this specific exam
   const record = await this.redis.getProgress(studentId, examId);
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return
-  const alreadyTaken = new Set(record?.questionMeta.map((q) => q.id) ?? []);
+
+  // 3️⃣ Identify already answered questions
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+  const alreadyTaken = new Set<number>(
+    (record?.questionMeta?.map((q: { id: number }) => q.id) ?? []),
+  );
   const answeredCount = alreadyTaken.size;
   const remainingToPick = exam.totalQuestions - answeredCount;
+
+  // 4️⃣ If student completed all questions, return only previously answered
   if (remainingToPick <= 0) {
-    // student has completed all questions — return all previously answered
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return
     return record?.questionMeta ?? [];
   }
 
+  // 5️⃣ Fetch all questions for this exam
   const allQuestions = await this.repository.find({
     where: { examId },
     select: ['id', 'question', 'options'],
   });
 
+  // 6️⃣ Filter only new questions that haven't been answered
   const newQuestions = allQuestions.filter((q) => !alreadyTaken.has(q.id));
 
   if (newQuestions.length < remainingToPick) {
@@ -180,15 +189,14 @@ async examTakerQuestions(examId: number, studentId: string) {
     );
   }
 
-  // Shuffle new questions only
+  // 7️⃣ Shuffle only the new questions
   const shuffledNew = newQuestions
     .map((q) => ({ sort: Math.random(), q }))
     .sort((a, b) => a.sort - b.sort)
     .slice(0, remainingToPick)
     .map((i) => i.q);
 
-  // Combine previously answered + new shuffled questions
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+  // 8️⃣ Combine previously answered with newly selected questions
   return [...(record?.questionMeta ?? []), ...shuffledNew];
 }
 }

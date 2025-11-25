@@ -122,6 +122,7 @@ async viewResult(className: string, subject: string,examType:string): Promise<Ex
 
   // 3️⃣ Map to ExpectedResultDTO
   return results.map((r) => ({
+    id: r.id,
     examId: examRef.id,
     regNo: r.regNo,
     score: r.score,

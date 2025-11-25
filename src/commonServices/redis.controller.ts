@@ -20,20 +20,20 @@ export class RedisController {
   // -------------------------------
   // 1. Active Students for Exam
   // -------------------------------
-  @Get('exam-active-students')
-  async getStudentsTakingExam(@Query('examId', ParseIntPipe) examId: number) {
-    try {
-      const students = await this.redis.getStudentsByExam(examId);
-      return this.response.success(
-        { count: students.length, students },
-        'Active students fetched successfully',
-        200,
-      );
-    } catch (e) {
-      console.error('❌ Error fetching active students:', e);
-      return this.response.error('Failed to fetch active students', 500);
-    }
-  }
+  // @Get('exam-active-students')
+  // async getStudentsTakingExam(@Query('examId', ParseIntPipe) examId: number) {
+  //   try {
+  //     const students = await this.redis.getStudentsByExam(examId);
+  //     return this.response.success(
+  //       { count: students.length, students },
+  //       'Active students fetched successfully',
+  //       200,
+  //     );
+  //   } catch (e) {
+  //     console.error('❌ Error fetching active students:', e);
+  //     return this.response.error('Failed to fetch active students', 500);
+  //   }
+  // }
 
   // -------------------------------
   // 2. Get Student Progress

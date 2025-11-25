@@ -1,5 +1,5 @@
 /* eslint-disable prettier/prettier */
-import { Body, Controller, Get, Post, Query } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Post, Query } from "@nestjs/common";
 import { ResultService } from "./result.service";
 import { ResponseService } from "src/commonServices/response.services";
 import { StudentUploadDTO } from "src/DTO/studentUploadDTO";
@@ -30,6 +30,21 @@ export class ResultsController{
               );
         }
     }    
+    @Delete()
+    async deleteResult(@Query("resultId") resultId:number){
+    try {
+        await this.resultServices.delete(resultId)
+        return this.responseServices.success(
+            null,
+            'Result deleted successfully',
+            200,
+          );
+    } catch (error) {
+            return this.responseServices.error(
+                (error as Error).message ?? 'Failed to delete result',
+                500,
+              );
+        }}    
     @Get()
     async viewResult(@Query("className") className:string,@Query("subject") subject:string, @Query("examType") examType:string){
     try {

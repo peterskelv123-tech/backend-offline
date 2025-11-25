@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-unsafe-return */
+/* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { createClient } from 'redis';
 
@@ -18,50 +20,67 @@ export class RedisService implements OnModuleDestroy {
       .catch((err) => console.error('❌ Redis connection failed:', err));
   }
   // ✅ Get all students taking a particular exam
-  async getStudentsByExam(examId: number) {
+  /* async getStudentsByExam(examId: number) {
     const allSnapshot = await this.getAttendanceSnapshot(); // gets all student records
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-member-access
-    return allSnapshot.filter((student) => student.examId === examId);
-  }
+    return allSnapshot.filter(
+      (student) =>
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+        Array.isArray(student.exams) &&
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+        student.exams.some((e) => e.examId === examId),
+    );
+  }*/
   async getStudent(studentId: string) {
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
     const json = await this.client.hGet('attendance', studentId);
     // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+    console.log('fetched student attendance:', json);
     return json ? JSON.parse(json) : null;
   }
 
-  // ✅ Save or update student
   async setAttendance(studentId: string, data: any) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    // Fetch existing attendance for this student
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
     const existingJson = await this.client.hGet('attendance', studentId);
 
-    let existing: any = {};
+    let attendanceList: any[] = [];
+
+    // Parse safely
     if (existingJson && typeof existingJson === 'string') {
       try {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-        existing = JSON.parse(existingJson);
+        const parsed = JSON.parse(existingJson);
+        attendanceList = Array.isArray(parsed) ? parsed : [];
       } catch {
-        existing = {};
+        attendanceList = [];
       }
     }
+    // -------------------------
+    //   FIND EXISTING EXAM ENTRY
+    // -------------------------
+    const index = attendanceList.findIndex(
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      (entry) => entry.examId === data.examId,
+    );
 
-    // Safely merge: only overwrite fields that exist in `data`
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-    const merged = {
-      ...existing,
-      ...data,
-      // optionally: explicitly preserve timeLeft if not in `data`
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
-      timeLeft: data.timeLeft ?? existing.timeLeft,
-    };
+    if (index !== -1) {
+      // Update existing exam entry
+      attendanceList[index] = data;
+    } else {
+      // Create new exam entry
+      attendanceList.push(data);
+    }
 
+    // Save back to Redis
     // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    await this.client.hSet('attendance', studentId, JSON.stringify(merged));
+    await this.client.hSet(
+      'attendance',
+      studentId,
+      JSON.stringify(attendanceList),
+    );
 
+    console.log('updated attendance:', attendanceList);
     // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-    console.log('merged data:', merged);
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-    return merged;
+    return attendanceList;
   }
 
   // ✅ Remove all students of a given exam
@@ -93,20 +112,72 @@ export class RedisService implements OnModuleDestroy {
     return delList.length;
   }
 
-  // ✅ Snapshot of all current students
   async getAttendanceSnapshot() {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
     const all = await this.client.hGetAll('attendance');
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unused-vars
-    console.log('all attendance:', all);
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unused-vars
-    return Object.entries(all).map(([_, json]) => JSON.parse(json as string));
+
+    const snapshot: any[] = [];
+
+    for (const [studentId, json] of Object.entries(all)) {
+      let attendanceList: any[] = [];
+      try {
+        const parsed = JSON.parse(json as string);
+        attendanceList = Array.isArray(parsed) ? parsed : [];
+      } catch {
+        attendanceList = [];
+      }
+
+      attendanceList.forEach((entry) => {
+        snapshot.push({
+          ...entry,
+          studentId,
+          // eslint-disable-next-line prettier/prettier, @typescript-eslint/no-unsafe-member-access
+          timeLeft: entry.timeLeft !== undefined  ? Math.max(0, Math.floor(Number(entry.timeLeft))) : null,
+        });
+      });
+    }
+
+    return snapshot;
   }
 
   // ✅ Remove one student
-  async removeStudent(studentId: string) {
+  async removeStudent(studentId: string, examId?: number) {
     // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    await this.client.hDel('attendance', studentId);
+    const existingJson = await this.client.hGet('attendance', studentId);
+    if (!existingJson) return;
+
+    let attendanceList: any[] = [];
+    try {
+      const parsed = JSON.parse(existingJson);
+      attendanceList = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      attendanceList = [];
+    }
+
+    if (examId !== undefined) {
+      // Remove specific exam
+      attendanceList = attendanceList.filter(
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+        (entry) => entry.examId !== examId,
+      );
+    } else {
+      // Remove entire student
+      attendanceList = [];
+    }
+
+    if (attendanceList.length === 0) {
+      // Delete the student key entirely
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+      await this.client.hDel('attendance', studentId);
+    } else {
+      // Save back remaining exams
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+      await this.client.hSet(
+        'attendance',
+        studentId,
+        JSON.stringify(attendanceList),
+      );
+    }
   }
 
   async removeManyStudents(studentIds: string[]) {
@@ -137,41 +208,117 @@ export class RedisService implements OnModuleDestroy {
   }
   async getProgress(studentId: string, examId: number) {
     const key = `progress:${examId}:${studentId}`;
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+
+    // 🔹 1) Get progress data
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
     const data = await this.client.hGetAll(key);
     if (!data || Object.keys(data).length === 0) return null;
 
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
-    const questionMeta = data.questionMeta ? JSON.parse(data.questionMeta) : [];
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
-    const answers = data.answers ? JSON.parse(data.answers) : [];
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, prettier/prettier
-    const currentIndex = Number.isFinite(Number(data.currentIndex))?parseInt(data.currentIndex, 10) : 0;
+    let questionMeta = [];
+    let answers = [];
+    let currentIndex = 0;
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      questionMeta = data.questionMeta ? JSON.parse(data.questionMeta) : [];
+    } catch {
+      questionMeta = [];
+    }
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      answers = data.answers ? JSON.parse(data.answers) : [];
+    } catch {
+      answers = [];
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+    if (typeof data.currentIndex === 'string') {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      const parsed = Number(data.currentIndex);
+      currentIndex = Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    // 🔹 2) Fetch attendance array (multi-exam structure)
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    const attendanceRaw = await this.client.hGet('attendance', studentId);
+
+    // eslint-disable-next-line @typescript-eslint/no-redundant-type-constituents
+    let attendance: any | null = null;
+    let timeLeft = null;
+    let active = null;
+
+    try {
+      const parsed = JSON.parse(attendanceRaw);
+
+      if (Array.isArray(parsed)) {
+        attendance = parsed;
+
+        // 🔹 3) Find THIS exam's attendance entry
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+        const examEntry = parsed.find((e) => e.examId === examId);
+
+        if (examEntry) {
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+          timeLeft = examEntry.timeLeft ?? null;
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+          active = examEntry.active ?? null;
+        }
+      }
+    } catch {
+      // ignore bad JSON
+    }
+
+    // 🔹 4) Return combined result
     return {
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       answers,
       currentIndex,
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       questionMeta,
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
-      totalQuestionsAnswered: questionMeta.length,
+      totalQuestionsAnswered: answers.length,
+      // ---> NEWLY ADDED fields
+      attendance: attendance ? attendance : [],
+      timeLeft,
+      active,
     };
   }
-  async removeStudentIfFinished(studentId: string, examTotalQuestions: number) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-    const student = await this.getStudent(studentId);
-    if (!student) return null;
-    if (
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-      student.timeLeft <= 0 ||
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-      (student.answered ?? 0) >= examTotalQuestions
-    ) {
-      await this.removeStudent(studentId);
+
+  async removeStudentIfFinished(
+    studentId: string,
+    examId: number,
+    examTotalQuestions: number,
+  ) {
+    const key = `${studentId}:${examId}`;
+
+    // Get the exam entry directly
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    const json = await this.client.hGet('attendance', key);
+    if (!json) return null;
+
+    let entry: any;
+    try {
+      entry = JSON.parse(json);
+    } catch {
+      return null;
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+    const finishedByTime = entry.timeLeft <= 0;
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+    const finishedByQuestions = (entry.answered ?? 0) >= examTotalQuestions;
+
+    if (finishedByTime || finishedByQuestions) {
+      // Remove ONLY this exam
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+      await this.client.hDel('attendance', key);
       return true;
     }
-    // otherwise mark inactive
-    await this.setAttendance(studentId, { active: false });
+
+    // Otherwise mark as inactive
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+    entry.active = false;
+
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    await this.client.hSet('attendance', key, JSON.stringify(entry));
     return false;
   }
 
@@ -186,25 +333,28 @@ export class RedisService implements OnModuleDestroy {
   ) {
     const key = `progress:${examId}:${studentId}`;
 
-    // Save progress in Redis
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    await this.client.hSet(key, {
-      answers: JSON.stringify(progress.answers),
-      currentIndex: progress.currentIndex.toString(),
-      questionMeta: JSON.stringify(progress.questionMeta),
-    });
-
-    // Set optional TTL
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    await this.client.expire(key, 24 * 60 * 60); // 24 hours
-    return {
-      answers: progress.answers,
-      currentIndex: progress.currentIndex,
-      questionMeta: progress.questionMeta,
+    // Normalize values
+    const normalized = {
+      answers: JSON.stringify(progress.answers ?? []),
+      currentIndex: String(progress.currentIndex ?? 0),
+      questionMeta: JSON.stringify(progress.questionMeta ?? []),
     };
-    // ✅ Fetch and log the content immediately for debugging
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+
+    // Save to Redis
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    await this.client.hSet(key, normalized);
+
+    // Optional TTL (24 hours)
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    await this.client.expire(key, 24 * 60 * 60);
+
+    return {
+      answers: progress.answers ?? [],
+      currentIndex: progress.currentIndex ?? 0,
+      questionMeta: progress.questionMeta ?? [],
+    };
   }
+
   // ✅ Clean shutdown
   async onModuleDestroy() {
     // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access

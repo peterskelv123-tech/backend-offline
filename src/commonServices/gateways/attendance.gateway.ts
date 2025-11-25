@@ -1,3 +1,6 @@
+/* eslint-disable @typescript-eslint/no-floating-promises */
+/* eslint-disable prettier/prettier */
+/* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import {
   WebSocketGateway,
   WebSocketServer,
@@ -75,9 +78,9 @@ export class AttendanceGateway {
       // 2️⃣ Use helper to remove or mark inactive
       const wasRemoved = await this.redis.removeStudentIfFinished(
         studentId,
+        examId,
         totalQuestions,
       );
-
       console.log(
         wasRemoved
           ? `🧹 Student ${studentId} removed — exam finished`
@@ -119,16 +122,15 @@ export class AttendanceGateway {
 
     // 1️⃣ Fetch all students in Redis
     const snapshot = await this.redis.getAttendanceSnapshot();
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-member-access
-    const redisStudentIds = snapshot.map((s) => s.studentId);
 
     // 2️⃣ Get real currently connected studentIds
     const connectedStudentIds = this.getConnectedStudents();
 
     // 3️⃣ Ghosts = in redis but not connected
-    const ghosts = redisStudentIds.filter(
-      (id) => !connectedStudentIds.includes(id),
-    );
+    const ghosts = snapshot
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-member-access
+      .map((s) => s.studentId)
+      .filter((id) => !connectedStudentIds.includes(id));
 
     console.log('👻 Ghost students:', ghosts);
 
@@ -136,33 +138,30 @@ export class AttendanceGateway {
     if (ghosts.length > 0) {
       await Promise.all(
         ghosts.map(async (studentId) => {
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-          const student = await this.redis.getStudent(studentId);
+          const studentExams = await this.redis.getStudent(studentId); // array of exams
+          if (!studentExams || !Array.isArray(studentExams)) return;
 
-          if (!student) return;
+          for (const examEntry of studentExams) {
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+            const examId = examEntry.examId;
+            const exam = await this.exam.findOne(examId);
+            if (!exam) continue;
 
-          // lookup student’s examId (exists in Redis attendance)
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
-          const examId = student.examId;
-          const exam = await this.exam.findOne(examId);
+            const totalQuestions = exam.totalQuestions;
 
-          if (!exam) return;
+            const removed = await this.redis.removeStudentIfFinished(
+              studentId,
+              examId,
+              totalQuestions,
+            );
 
-          const totalQuestions = exam.totalQuestions;
-
-          // 🔥 use the same helper used for disconnect logic
-          const removed = await this.redis.removeStudentIfFinished(
-            studentId,
-            totalQuestions,
-          );
-
-          if (!removed) {
-            // mark ghost but not finished
-            await this.redis.setAttendance(studentId, {
-              active: false,
-              // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
-              timeLeft: student.timeLeft,
-            });
+            if (!removed) {
+              // mark only this exam inactive
+              await this.redis.setAttendance(studentId, {
+                ...examEntry,
+                active: false,
+              });
+            }
           }
         }),
       );
@@ -180,49 +179,61 @@ export class AttendanceGateway {
   // ✅ STUDENT STARTS EXAM
   // ✅ STUDENT JOIN EXAM
   @SubscribeMessage('student-join')
-  async studentJoin(@MessageBody() data, @ConnectedSocket() client) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-    const { examId, studentId, timeLeft } = data;
+async studentJoin(@MessageBody() data, @ConnectedSocket() client) {
+  const { examId, studentId } = data;
+
+  const merged = {
+    studentId,
+    examId,
+    active: true,
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+    answered: data.answered ?? 0,
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+    timeLeft: data.timeLeft ?? 0,
+  };
+
+  // Always store as an array
+  const studentExams = await this.redis.getStudent(studentId) || [];
+
+  // Add or replace existing exam entry
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+  const index = studentExams.findIndex(e => e.examId === examId);
+
+  if (index === -1) {
     // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    if (this.studentSockets.has(studentId)) {
-      console.log('♻️ Replacing old socket for', studentId);
-      this.studentSockets.delete(studentId);
-    }
-    this.studentSockets.set(studentId, client);
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    client.join('exam-room');
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
-    client.data.studentId = studentId;
-
-    const studentState = {
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      studentId,
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      examId,
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      timeLeft,
-      answered: 0,
-      active: true,
-    };
-    await this.redis.setAttendance(studentId, studentState);
-
-    if (await this.redis.isAdminOnline()) {
-      const snapshot = (await this.redis.getAttendanceSnapshot()).filter(
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-        (it) => it.active,
-      );
-      this.server.to('admin-room').emit('attendance-update', snapshot);
-    }
-
-    return { ok: true };
+    studentExams.push(merged);
+  } else {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+    studentExams[index] = { ...studentExams[index], ...merged };
   }
+
+  await this.redis.setAttendance(studentId, studentExams);
+
+  this.studentSockets.set(studentId, client);
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+  client.join('exam-room');
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+  client.data.studentId = studentId;
+
+  if (await this.redis.isAdminOnline()) {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+    const snapshot = (await this.redis.getAttendanceSnapshot()).filter(it => it.active);
+    this.server.to('admin-room').emit('attendance-update', snapshot);
+  }
+
+  return { ok: true };
+}
 
   // ✅ STUDENT LIVE STATUS UPDATE
   @SubscribeMessage('student-status')
   async studentStatus(@MessageBody() data) {
     // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access
-    await this.redis.setAttendance(data.studentId, data);
-    //console.log(data);
+   await this.redis.setAttendance(data.studentId, data)
+  
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+    console.log(`⏳ Updated status for ${data.studentId} in exam ${data.examId}`);
+
+    // Admin snapshot update
     if (await this.redis.isAdminOnline()) {
       const snapshot = (await this.redis.getAttendanceSnapshot()).filter(
         // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
@@ -234,46 +245,48 @@ export class AttendanceGateway {
 
   // ✅ ADMIN STOPS ONE STUDENT
   @SubscribeMessage('admin-stop-exam')
-  async stopExam(@MessageBody() data: { studentId: string }) {
-    const { studentId } = data;
+  async stopExam(@MessageBody() data: { studentId: string; examId: number }) {
+    const { studentId, examId } = data;
 
-    // 1️⃣ Get student state
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-    const student = await this.redis.getStudent(studentId);
-    if (!student) {
+    // 1️⃣ Get all exams for this student
+    const studentExams = await this.redis.getStudent(studentId);
+    if (!studentExams || !Array.isArray(studentExams)) {
       console.log(`⚠️ No student found in Redis for ${studentId}`);
       return;
     }
 
-    // 2️⃣ Fetch the student's exam
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access
-    const exam = await this.exam.findOne(student.examId);
+    // 2️⃣ Fetch the exam from DB
+    const exam = await this.exam.findOne(examId);
     if (!exam) {
-      throw new Error('Student has no valid exam record');
+      throw new Error('Student has no valid exam record for this examId');
     }
-
     const totalQuestions = exam.totalQuestions;
 
-    // 3️⃣ Use the helper (removes if finished, marks inactive if not)
+    // 3️⃣ Remove exam if finished or mark inactive
     const removed = await this.redis.removeStudentIfFinished(
       studentId,
+      examId,
       totalQuestions,
     );
 
     if (!removed) {
-      // Student hasn't finished → mark inactive
-      await this.redis.setAttendance(studentId, {
-        active: false,
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
-        timeLeft: student.timeLeft,
-      });
+      // Exam not finished → mark inactive
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      const index = studentExams.findIndex((e) => e.examId === examId);
+      if (index !== -1) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+        studentExams[index].active = false;
+        await this.redis.setAttendance(studentId, studentExams);
+      }
     }
 
-    // 4️⃣ Emit force-stop to the actual student
+    // 4️⃣ Emit force-stop to the student
     const studentSocket = this.studentSockets.get(studentId);
     if (studentSocket) {
-      console.log(`📡 Emitting force-stop to student ${studentId}`);
-      studentSocket.emit('force-stop', { studentId });
+      console.log(
+        `📡 Emitting force-stop to student ${studentId} for exam ${examId}`,
+      );
+      studentSocket.emit('force-stop', { studentId, examId });
     } else {
       console.log(`⚠️ No active socket found for student ${studentId}`);
     }
@@ -287,8 +300,8 @@ export class AttendanceGateway {
       this.server.to('admin-room').emit('attendance-update', snapshot);
     }
 
-    // 6️⃣ Emit stop notification
-    this.server.to('admin-room').emit('student-stopped', { studentId });
+    // 6️⃣ Notify admin
+    this.server.to('admin-room').emit('student-stopped', { studentId, examId });
   }
   // ✅ STUDENT LEAVES EXPLICITLY (submit)
 
@@ -303,12 +316,24 @@ export class AttendanceGateway {
 
     console.log(`👋 Student-leave received for ${studentId}`);
 
-    // 1️⃣ Mark student inactive
-    await this.redis.setAttendance(studentId, {
-      active: false,
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      timeLeft: timeLeft,
-    });
+    // 1️⃣ Fetch all exams for this student
+    const studentExams = await this.redis.getStudent(studentId);
+    if (studentExams && Array.isArray(studentExams)) {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+      const updatedExams = studentExams.map((exam) => ({
+        ...exam,
+        active: false,
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+        timeLeft: exam.timeLeft ?? timeLeft,
+      }));
+
+      // Save back all entries
+    Promise.all(
+      updatedExams.map(async (exam) => {
+        await this.redis.setAttendance(studentId, exam);
+      }),
+    );
+    }
 
     // 2️⃣ Get fresh snapshot from Redis
     const snapshot = await this.redis.getAttendanceSnapshot();
@@ -318,7 +343,7 @@ export class AttendanceGateway {
     // 3️⃣ Get connected student IDs from sockets
     const connectedStudentIds = this.getConnectedStudents();
 
-    // 4️⃣ Determine ghost users: exist in redis but socket not active
+    // 4️⃣ Determine ghost users: exist in Redis but socket not active
     const ghosts = redisStudentIds.filter(
       (id) => !connectedStudentIds.includes(id),
     );
@@ -327,13 +352,19 @@ export class AttendanceGateway {
     if (ghosts.length > 0) {
       await Promise.all(
         ghosts.map(async (id) => {
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
           const idDetails = snapshot.find((it) => it.studentId === id);
-          await this.redis.setAttendance(id, {
-            active: false,
-            // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
-            timeLeft: idDetails.timeLeft ?? 0,
-          });
+          const exams = await this.redis.getStudent(id);
+          if (exams && Array.isArray(exams)) {
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+            const updated = exams.map((e) => ({
+              ...e,
+              active: false,
+              // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+              timeLeft: e.timeLeft ?? idDetails.timeLeft ?? 0,
+            }));
+            await this.redis.setAttendance(id, updated);
+          }
         }),
       );
       console.log(`👻 Marked ghost students inactive:`, ghosts);

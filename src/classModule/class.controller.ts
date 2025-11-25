@@ -34,13 +34,13 @@ export class ClassController {
     try {
       const data = await this.classService.findAll();
       if (!data.length) {
-        this.response.error('there is no class in the database', 404);
+        return this.response.error('there is no class in the database', 404);
       } else {
-        this.response.success(data, 'classes fetched successfully', 200);
+        return this.response.success(data, 'classes fetched successfully', 200);
       }
     } catch (error: any) {
       // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access
-      this.response.error(error.message ?? 'internal server error', 500);
+      return this.response.error(error.message ?? 'internal server error', 500);
     }
   }
   @Post('/')
