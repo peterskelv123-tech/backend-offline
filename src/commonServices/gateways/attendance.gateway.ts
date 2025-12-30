@@ -192,22 +192,8 @@ async studentJoin(@MessageBody() data, @ConnectedSocket() client) {
     timeLeft: data.timeLeft ?? 0,
   };
 
-  // Always store as an array
-  const studentExams = await this.redis.getStudent(studentId) || [];
 
-  // Add or replace existing exam entry
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-  const index = studentExams.findIndex(e => e.examId === examId);
-
-  if (index === -1) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    studentExams.push(merged);
-  } else {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-    studentExams[index] = { ...studentExams[index], ...merged };
-  }
-
-  await this.redis.setAttendance(studentId, studentExams);
+  await this.redis.setAttendance(studentId, merged);
 
   this.studentSockets.set(studentId, client);
   // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
@@ -263,23 +249,11 @@ async studentJoin(@MessageBody() data, @ConnectedSocket() client) {
     const totalQuestions = exam.totalQuestions;
 
     // 3️⃣ Remove exam if finished or mark inactive
-    const removed = await this.redis.removeStudentIfFinished(
+     await this.redis.removeStudentIfFinished(
       studentId,
       examId,
       totalQuestions,
     );
-
-    if (!removed) {
-      // Exam not finished → mark inactive
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-      const index = studentExams.findIndex((e) => e.examId === examId);
-      if (index !== -1) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-        studentExams[index].active = false;
-        await this.redis.setAttendance(studentId, studentExams);
-      }
-    }
-
     // 4️⃣ Emit force-stop to the student
     const studentSocket = this.studentSockets.get(studentId);
     if (studentSocket) {
@@ -326,7 +300,6 @@ async studentJoin(@MessageBody() data, @ConnectedSocket() client) {
         // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
         timeLeft: exam.timeLeft ?? timeLeft,
       }));
-
       // Save back all entries
     Promise.all(
       updatedExams.map(async (exam) => {
@@ -334,7 +307,6 @@ async studentJoin(@MessageBody() data, @ConnectedSocket() client) {
       }),
     );
     }
-
     // 2️⃣ Get fresh snapshot from Redis
     const snapshot = await this.redis.getAttendanceSnapshot();
     // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-member-access
@@ -350,23 +322,28 @@ async studentJoin(@MessageBody() data, @ConnectedSocket() client) {
 
     // 5️⃣ Mark all ghosts inactive (batch update)
     if (ghosts.length > 0) {
+     await Promise.all(
+  ghosts.map(async (id) => {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+    const idDetails = snapshot.find((it) => it.studentId === id);
+    const exams = await this.redis.getStudent(id);
+
+    if (exams && Array.isArray(exams)) {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+      const updated = exams.map((e) => ({
+        ...e,
+        active: false,
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+        timeLeft: e.timeLeft ?? idDetails.timeLeft ?? 0,
+      }));
+
+      // SAVE EACH EXAM, NOT THE ARRAY
       await Promise.all(
-        ghosts.map(async (id) => {
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-          const idDetails = snapshot.find((it) => it.studentId === id);
-          const exams = await this.redis.getStudent(id);
-          if (exams && Array.isArray(exams)) {
-            // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-            const updated = exams.map((e) => ({
-              ...e,
-              active: false,
-              // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-              timeLeft: e.timeLeft ?? idDetails.timeLeft ?? 0,
-            }));
-            await this.redis.setAttendance(id, updated);
-          }
-        }),
+        updated.map((exam) => this.redis.setAttendance(id, exam))
       );
+    }
+  })
+);
       console.log(`👻 Marked ghost students inactive:`, ghosts);
     }
 

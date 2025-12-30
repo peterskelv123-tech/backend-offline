@@ -31,7 +31,7 @@ export class QuestionService extends BaseService<Question> {
    * Extract questions from file and insert them.
    * ✅ Works with OR without a transaction (optional manager)
    */
-  async extractQuestionsFromFile(
+async extractQuestionsFromFile(
     filePath: string,
     exam: Exam,
     manager?: EntityManager, // ✅ our upgraded pattern
@@ -71,7 +71,7 @@ export class QuestionService extends BaseService<Question> {
 
     // --- STEP 2: Parse questions ---
     const questions = this.parseQuestions(text);
-
+console.log('Parsed Questions:', questions.length);
     if (questions.length === 0) {
       throw new Error('No valid questions found in the file.');
     }

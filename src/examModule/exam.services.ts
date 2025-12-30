@@ -3,7 +3,7 @@ import { forwardRef, Inject, Injectable } from '@nestjs/common';
 import { BaseService } from 'src/commonServices/BaseServices';
 import { Exam } from './exam.entity';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, Not, Repository } from 'typeorm';
 import { DatabaseHealthService } from 'src/commonServices/database-health.service';
 import { QuestionService } from 'src/QuestionModule/question.service';
 import { ExamDataDto } from 'src/DTO/examDataDto';
@@ -144,6 +144,15 @@ async deleteAnExamEntry(examID: number) {
       const examRepo = manager.getRepository(Exam);
       const exam = await examRepo.findOne({ where: { id: examId } });
       if (!exam) throw new Error(`Exam with ID ${examId} not found.`);
+      if(status===true && exam.classId){
+        const classActiveExams=await examRepo.find({ where:{classId:exam.classId,status:true}});
+       if(classActiveExams.length>0){
+     await examRepo.update(
+  { classId: exam.classId, status: true, id: Not(examId) },
+  { status: false }
+);
+       }
+      }
       exam.status = status;
       return await examRepo.save(exam);
     });
