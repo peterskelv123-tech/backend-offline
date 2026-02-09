@@ -55,60 +55,63 @@ export class AttendanceGateway {
   }
 
   // ✅ When a socket disconnects
-  async handleDisconnect(client: Socket) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-    const { studentId, admin, examId } = client.data || {};
-    console.log('📤 handleDisconnect fired with data:', client.data);
+async handleDisconnect(client: Socket) {
+  const { studentId, admin, examId } = client.data || {};
+  console.log('📤 handleDisconnect fired with data:', client.data);
 
-    // ===========================
-    // STUDENT DISCONNECT LOGIC
-    // ===========================
-    if (studentId && examId) {
-      this.studentSockets.delete(studentId);
-
-      // 1️⃣ Load exam using service
-      const exam = await this.exam.findOne(examId);
-      if (!exam) {
-        console.error(`❌ Exam with id ${examId} not found`);
-        return;
-      }
-
-      const totalQuestions = exam.totalQuestions;
-
-      // 2️⃣ Use helper to remove or mark inactive
-      const wasRemoved = await this.redis.removeStudentIfFinished(
-        studentId,
-        examId,
-        totalQuestions,
-      );
-      console.log(
-        wasRemoved
-          ? `🧹 Student ${studentId} removed — exam finished`
-          : `🛑 Student ${studentId} disconnected but can resume later`,
-      );
-
-      // 3️⃣ Notify admin
-      if (await this.redis.isAdminOnline()) {
-        const snapshot = (await this.redis.getAttendanceSnapshot()).filter(
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-          (item) => item.active === true,
-        );
-
-        this.server.to('admin-room').emit('attendance-update', snapshot);
-      }
-
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      this.server.to('admin-room').emit('student-left', { studentId });
+  // ===========================
+  // STUDENT DISCONNECT LOGIC
+  // ===========================
+  if (studentId && examId) {
+    // 1️⃣ Remove from in-memory socket map
+    const existed = this.studentSockets.delete(studentId);
+    if (existed) {
+      console.log(`❌ Student ${studentId} socket removed from map`);
+    } else {
+      console.log(`⚠️ Student ${studentId} socket not found in map`);
     }
 
-    // ===========================
-    // ADMIN DISCONNECT LOGIC
-    // ===========================
-    if (admin) {
-      console.log('🛑 Admin disconnected');
-      await this.redis.setAdminOnline(false);
+    // 2️⃣ Load exam using service
+    const exam = await this.exam.findOne(examId);
+    if (!exam) {
+      console.error(`❌ Exam with id ${examId} not found`);
+      return;
     }
+    const totalQuestions = exam.totalQuestions;
+
+    // 3️⃣ Remove or mark inactive in Redis
+    const wasRemoved = await this.redis.removeStudentIfFinished(
+      studentId,
+      examId,
+      totalQuestions,
+    );
+    console.log(
+      wasRemoved
+        ? `🧹 Student ${studentId} removed — exam finished`
+        : `🛑 Student ${studentId} disconnected but can resume later`,
+    );
+
+    // 4️⃣ Update admin dashboard if online
+    if (await this.redis.isAdminOnline()) {
+      const snapshot = (await this.redis.getAttendanceSnapshot()).filter(
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+        (item) => item.active === true,
+      );
+      this.server.to('admin-room').emit('attendance-update', snapshot);
+    }
+
+    // 5️⃣ Notify admin this student left
+    this.server.to('admin-room').emit('student-left', { studentId });
   }
+
+  // ===========================
+  // ADMIN DISCONNECT LOGIC
+  // ===========================
+  if (admin) {
+    console.log('🛑 Admin disconnected');
+    await this.redis.setAdminOnline(false);
+  }
+}
 
   // ✅ ADMIN JOIN DASHBOARD
   @SubscribeMessage('admin-join')
@@ -178,29 +181,27 @@ export class AttendanceGateway {
 
   // ✅ STUDENT STARTS EXAM
   // ✅ STUDENT JOIN EXAM
-  @SubscribeMessage('student-join')
+@SubscribeMessage('student-join')
 async studentJoin(@MessageBody() data, @ConnectedSocket() client) {
   const { examId, studentId } = data;
 
-  const merged = {
-    studentId,
-    examId,
-    active: true,
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-    answered: data.answered ?? 0,
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-    timeLeft: data.timeLeft ?? 0,
-  };
-
-
-  await this.redis.setAttendance(studentId, merged);
-
+  // Immediately register socket
   this.studentSockets.set(studentId, client);
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-  client.join('exam-room');
+
+  // Mark student ID on socket
   // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
   client.data.studentId = studentId;
 
+  // Join exam-room
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+  client.join(`exam-${examId}`);
+
+   // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+   client.join(`student-room-${studentId}`);
+  // Save attendance in Redis
+  await this.redis.setAttendance(studentId, { studentId, examId, active: true });
+
+  // Notify admin if online
   if (await this.redis.isAdminOnline()) {
     // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
     const snapshot = (await this.redis.getAttendanceSnapshot()).filter(it => it.active);
@@ -211,72 +212,84 @@ async studentJoin(@MessageBody() data, @ConnectedSocket() client) {
 }
 
   // ✅ STUDENT LIVE STATUS UPDATE
-  @SubscribeMessage('student-status')
-  async studentStatus(@MessageBody() data) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access
-   await this.redis.setAttendance(data.studentId, data)
-  
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-    console.log(`⏳ Updated status for ${data.studentId} in exam ${data.examId}`);
+ @SubscribeMessage('student-status')
+async studentStatus(@MessageBody() data, @ConnectedSocket() client: Socket) {
+  const { studentId, examId } = data;
 
-    // Admin snapshot update
-    if (await this.redis.isAdminOnline()) {
-      const snapshot = (await this.redis.getAttendanceSnapshot()).filter(
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-        (it) => it.active,
-      );
-      this.server.to('admin-room').emit('attendance-update', snapshot);
-    }
+  // 1️⃣ Update Redis with latest student status
+  await this.redis.setAttendance(studentId, data);
+
+  // 2️⃣ Update in-memory map with the latest socket
+  // ✅ This ensures that even if the student reconnects, we have their current socket
+  this.studentSockets.set(studentId, client);
+
+  // 3️⃣ Send updates to invigilator (teacher) room
+  const roomId = await this.redis.getRoomByExam(examId);
+  if (roomId === null) {
+    throw new Error("invalid room id");
   }
+
+  const student_invigilator = await this.redis.getInvigilatorByStudent(roomId, studentId);
+  console.log(`⏳ Updated status for ${studentId} in exam ${examId}`);
+  this.server.to(`${student_invigilator}_room`).emit('student-update', data);
+
+  // 4️⃣ Admin snapshot update
+  if (await this.redis.isAdminOnline()) {
+    const snapshot = (await this.redis.getAttendanceSnapshot()).filter(
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      (it) => it.active,
+    );
+    this.server.to('admin-room').emit('attendance-update', snapshot);
+  }
+}
 
   // ✅ ADMIN STOPS ONE STUDENT
-  @SubscribeMessage('admin-stop-exam')
-  async stopExam(@MessageBody() data: { studentId: string; examId: number }) {
-    const { studentId, examId } = data;
+ @SubscribeMessage('admin-stop-exam')
+async stopExam(@MessageBody() data: { studentId: string; examId: number }) {
+  const { studentId, examId } = data;
+  console.log(`🛑 Admin requested to stop student ${studentId} for exam ${examId}`);
 
-    // 1️⃣ Get all exams for this student
-    const studentExams = await this.redis.getStudent(studentId);
-    if (!studentExams || !Array.isArray(studentExams)) {
-      console.log(`⚠️ No student found in Redis for ${studentId}`);
-      return;
-    }
-
-    // 2️⃣ Fetch the exam from DB
-    const exam = await this.exam.findOne(examId);
-    if (!exam) {
-      throw new Error('Student has no valid exam record for this examId');
-    }
-    const totalQuestions = exam.totalQuestions;
-
-    // 3️⃣ Remove exam if finished or mark inactive
-     await this.redis.removeStudentIfFinished(
-      studentId,
-      examId,
-      totalQuestions,
-    );
-    // 4️⃣ Emit force-stop to the student
-    const studentSocket = this.studentSockets.get(studentId);
-    if (studentSocket) {
-      console.log(
-        `📡 Emitting force-stop to student ${studentId} for exam ${examId}`,
-      );
-      studentSocket.emit('force-stop', { studentId, examId });
-    } else {
-      console.log(`⚠️ No active socket found for student ${studentId}`);
-    }
-
-    // 5️⃣ Update admin dashboard
-    if (await this.redis.isAdminOnline()) {
-      const snapshot = (await this.redis.getAttendanceSnapshot()).filter(
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-        (it) => it.active,
-      );
-      this.server.to('admin-room').emit('attendance-update', snapshot);
-    }
-
-    // 6️⃣ Notify admin
-    this.server.to('admin-room').emit('student-stopped', { studentId, examId });
+  // 1️⃣ Get all exams for this student
+  const studentExams = await this.redis.getStudent(studentId);
+  if (!studentExams || !Array.isArray(studentExams)) {
+    console.log(`⚠️ No student found in Redis for ${studentId}`);
+    return;
   }
+
+  // 2️⃣ Fetch the exam from DB
+  const exam = await this.exam.findOne(examId);
+  if (!exam) {
+    throw new Error('Student has no valid exam record for this examId');
+  }
+  const totalQuestions = exam.totalQuestions;
+
+  // 3️⃣ Remove exam if finished or mark inactive
+  await this.redis.removeStudentIfFinished(studentId, examId, totalQuestions);
+
+  // 4️⃣ Emit force-stop to the student
+  const studentSocket = this.studentSockets.get(studentId);
+
+  if (studentSocket) {
+    console.log(`📡 Emitting force-stop to student ${studentId} via socket`);
+    studentSocket.emit('force-stop', { studentId, examId });
+  } else {
+    console.log(`⚠️ No active socket found for student ${studentId}, using backup room emit`);
+    // 🔹 Use dedicated private student room as backup
+    this.server.to(`student-room-${studentId}`).emit('force-stop', { studentId, examId });
+  }
+
+  // 5️⃣ Update admin dashboard
+  if (await this.redis.isAdminOnline()) {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+    const snapshot = (await this.redis.getAttendanceSnapshot()).filter((it) => it.active);
+    this.server.to('admin-room').emit('attendance-update', snapshot);
+  }
+
+  // 6️⃣ Notify admin
+  this.server.to('admin-room').emit('student-stopped', { studentId, examId });
+}
+
+
   // ✅ STUDENT LEAVES EXPLICITLY (submit)
 
   @SubscribeMessage('student-leave')

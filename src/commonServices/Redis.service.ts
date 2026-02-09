@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-unsafe-call */
+/* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-unsafe-return */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
@@ -19,22 +21,322 @@ export class RedisService implements OnModuleDestroy {
       // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
       .catch((err) => console.error('❌ Redis connection failed:', err));
   }
-  // ✅ Get all students taking a particular exam
-  /* async getStudentsByExam(examId: number) {
-    const allSnapshot = await this.getAttendanceSnapshot(); // gets all student records
-    return allSnapshot.filter(
-      (student) =>
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-        Array.isArray(student.exams) &&
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-        student.exams.some((e) => e.examId === examId),
+  // =====================
+  // EXAM ↔ ROOM MAPPING
+  // =====================
+
+  async createRoomForExam(examId: number, roomId: string, ttlSeconds: number) {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+    await this.client
+      .multi()
+      .set(`exam:room:${roomId}`, String(examId))
+      .set(`exam:room:byExam:${examId}`, roomId)
+      .expire(`exam:room:${roomId}`, ttlSeconds)
+      .expire(`exam:room:byExam:${examId}`, ttlSeconds)
+      .exec();
+  }
+  async isInvigilatorInRoom(
+    roomId: string,
+    invigilatorId: string,
+  ): Promise<boolean> {
+    const roomInvigilatorsKey = `room:${roomId}:invigilators`;
+
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+    const isMember = await this.client.sIsMember(
+      roomInvigilatorsKey,
+      invigilatorId,
     );
-  }*/
+
+    return isMember === 1;
+  }
+
+  async getExamByRoom(roomId: string): Promise<number> {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+    const examId = await this.client.get(`exam:room:${roomId}`);
+
+    if (!examId) {
+      // Throwing error instead of returning null
+      throw new Error(`No exam found for Room ID: ${roomId}`);
+    }
+
+    return Number(examId);
+  }
+
+  async removeRoomByExam(examId: number): Promise<void> {
+    const examRoomKey = `exam:room:byExam:${examId}`;
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+    const roomId = await this.client.get(examRoomKey);
+    if (!roomId) return;
+
+    const hasActiveStudents = await this.hasActiveStudentsForExamRaw(examId);
+    if (hasActiveStudents) return;
+
+    const invigilatorsKey = `room:${roomId}:invigilators`;
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+    const invigilators = await this.client.sMembers(invigilatorsKey);
+
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+    const pipeline = this.client.multi();
+
+    for (const invId of invigilators) {
+      const streamsKey = `room:${roomId}:invigilator:${invId}:streams`;
+
+      const [streams, online] = await Promise.all([
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+        this.client.sMembers(streamsKey),
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+        this.client.hGet(`invigilator:${invId}`, 'online'),
+      ]);
+
+      for (const streamId of streams) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+        pipeline.del(`stream:${streamId}`);
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+      pipeline.del(streamsKey);
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+      pipeline.del(`room:${roomId}:invigilator:${invId}:students`);
+
+      if (online === 'false') {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+        pipeline.del(`invigilator:${invId}`);
+      }
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+    pipeline.del(invigilatorsKey);
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+    pipeline.del(`exam:room:${roomId}`);
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+    pipeline.del(examRoomKey);
+
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+    await pipeline.exec();
+  }
+  async getRoomInvigilationState(roomId: string) {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+    const invigilators = await this.client.sMembers(
+      `room:${roomId}:invigilators`,
+    );
+
+    const result = {};
+    for (const invigilator of invigilators) {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+      const streams = await this.client.sMembers(
+        `room:${roomId}:invigilator:${invigilator}:streams`,
+      );
+      result[invigilator] = streams;
+    }
+
+    return result;
+  }
+  async removeStudentFromInvigilator(
+    roomId: string,
+    invigilatorId: string,
+    studentId: string,
+    socketId: string,
+  ): Promise<void> {
+    const studentsKey = `room:${roomId}:invigilator:${invigilatorId}:students`;
+    const invigilatorKey = `invigilator:${invigilatorId}`;
+
+    await this.client
+      .multi()
+      // 1️⃣ Remove student from invigilator supervision
+      .sRem(studentsKey, studentId)
+
+      // 2️⃣ Remove socket from student sockets
+      .sRem(`student:${studentId}:sockets`, socketId)
+
+      // 3️⃣ Remove active socket mapping (optional but clean)
+      .del(`student:${studentId}:socket`)
+      .exec();
+
+    // 4️⃣ Check if invigilator still has students
+    const remainingStudents = await this.client.sCard(studentsKey);
+
+    if (remainingStudents === 0) {
+      await this.client.hSet(invigilatorKey, { online: 'false' });
+    }
+  }
+  async registerInvigilator(
+    roomId: string,
+    invigilatorName: string,
+  ): Promise<void> {
+    const roomInvigilatorsKey = `room:${roomId}:invigilators`;
+
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+    await this.client.sAdd(roomInvigilatorsKey, invigilatorName);
+
+    // No streams added here.
+    // The empty set is implicit.
+  }
+  async registerInvigilatorSocket(
+    invigilatorId: string,
+    socketId: string,
+  ): Promise<void> {
+    const key = `invigilator:${invigilatorId}`;
+
+    // Store socketId, initial offline state, and TTL
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+    await this.client.hSet(key, {
+      socketId,
+      online: 'false',
+      lastSeen: Date.now().toString(),
+    });
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+    await this.client.expire(key, 20); // 20s TTL for heartbeat
+  }
+  async invigilatorHeartbeat(invigilatorId: string): Promise<void> {
+    const key = `invigilator:${invigilatorId}`;
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+    const exists = await this.client.exists(key);
+    if (!exists) return; // invigilator not registered
+
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+    await this.client.expire(key, 20); // refresh TTL
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+    await this.client.hSet(key, { lastSeen: Date.now().toString() });
+  }
+  async cleanupOfflineInvigilators(invigilatorId?: string): Promise<void> {
+    // If a specific invigilator is provided
+    if (invigilatorId) {
+      const key = `invigilator:${invigilatorId}`;
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+      const exists = await this.client.exists(key);
+      if (!exists) return; // key already gone (expired)
+
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+      const online = await this.client.hGet(key, 'online');
+      if (online === 'false') {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+        await this.client.del(key);
+      }
+      return;
+    }
+
+    // No specific invigilator provided: sweep all
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+    const keys = await this.client.keys('invigilator:*');
+    for (const key of keys) {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+      const exists = await this.client.exists(key);
+      if (!exists) continue; // expired via TTL
+
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+      const online = await this.client.hGet(key, 'online');
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+      if (online === 'false') await this.client.del(key);
+    }
+  }
+
+  async getInvigilatorSocket(invigilatorId: string): Promise<string | null> {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+    const socketId = await this.client.hGet(
+      `invigilator:${invigilatorId}`,
+      'socketId',
+    );
+    return socketId; // returns null if hash or field doesn’t exist
+  }
+  async getInvigilatorByStudent(
+    roomId: string,
+    studentID: string,
+  ): Promise<string | null> {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+    const invigilators = await this.client.sMembers(
+      `room:${roomId}:invigilators`,
+    );
+
+    for (const invId of invigilators) {
+      const studentsKey = `room:${roomId}:invigilator:${invId}:students`;
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+      const isAssigned = await this.client.sIsMember(studentsKey, studentID);
+      if (isAssigned) return invId;
+    }
+
+    return null; // no invigilator currently monitoring
+  }
+
+  // ---------------------------
+  // 4️⃣ Assign a stream and student to invigilator
+  // ---------------------------
+  async assignStudentToInvigilator(
+    roomId: string,
+    studentId: string,
+    studentSocketId: string,
+  ): Promise<{ invigilatorId: string; socketId: string }> {
+    // 0️⃣ Idempotency: if student already assigned, return existing
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+    const existing = await this.client.hGetAll(`student:${studentId}:socket`);
+    if (existing && existing.invigilatorId) {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+      const socketId = await this.client.hGet(
+        `invigilator:${existing.invigilatorId}`,
+        'socketId',
+      );
+      return { invigilatorId: existing.invigilatorId, socketId };
+    }
+
+    // 1️⃣ Load available invigilators
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+    const invigilators = await this.client.sMembers(
+      `room:${roomId}:invigilators`,
+    );
+    if (!invigilators.length) throw new Error('No invigilators available');
+
+    // 2️⃣ Load-balanced selection
+    let selected: string | null = null;
+    let minStudents = Infinity;
+    for (const invId of invigilators) {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+      const count = await this.client.sCard(
+        `room:${roomId}:invigilator:${invId}:students`,
+      );
+      if (count < 4 && count < minStudents) {
+        minStudents = count;
+        selected = invId;
+      }
+    }
+    if (!selected) throw new Error('All invigilators are at max capacity');
+
+    // 3️⃣ Atomic assignment in Redis
+    const invigilatorKey = `invigilator:${selected}`;
+    await this.client
+      .multi()
+      .sAdd(`room:${roomId}:invigilator:${selected}:students`, studentId)
+      .sAdd(`student:${studentId}:sockets`, studentSocketId)
+      .hSet(`student:${studentId}:socket`, {
+        socketId: studentSocketId,
+        invigilatorId: selected,
+      })
+      .hSet(invigilatorKey, { online: 'true' })
+      .exec();
+
+    // 4️⃣ Return invigilator socket
+    const invSocketId = await this.client.hGet(invigilatorKey, 'socketId');
+    if (!invSocketId) throw new Error('Invigilator socket not found');
+
+    return { invigilatorId: selected, socketId: invSocketId };
+  }
+
+  async getStudentsForInvigilator(
+    roomId: string,
+    invigilatorId: string,
+  ): Promise<string[]> {
+    return await this.client.sMembers(
+      `room:${roomId}:invigilator:${invigilatorId}:students`,
+    );
+  }
+
+  async getRoomByExam(examId: number): Promise<string | null> {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+    return await this.client.get(`exam:room:byExam:${examId}`);
+  }
   async getStudent(studentId: string) {
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
     const json = await this.client.hGet('attendance', studentId);
     // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-    console.log('fetched student attendance:', json);
+    //console.log('fetched student attendance:', json);
     return json ? JSON.parse(json) : null;
   }
 
@@ -89,7 +391,7 @@ export class RedisService implements OnModuleDestroy {
       JSON.stringify(attendanceList),
     );
 
-    console.log('updated attendance:', attendanceList);
+    //console.log('updated attendance:', attendanceList);
     // eslint-disable-next-line @typescript-eslint/no-unsafe-return
     return attendanceList;
   }
@@ -121,6 +423,27 @@ export class RedisService implements OnModuleDestroy {
     }
 
     return delList.length;
+  }
+  async hasActiveStudentsForExamRaw(examId: number): Promise<boolean> {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+    const all = await this.client.hGetAll('attendance');
+
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    for (const [studentId, json] of Object.entries(all)) {
+      let exams: any[] = [];
+      try {
+        const parsed = JSON.parse(json as string);
+        exams = Array.isArray(parsed) ? parsed : [];
+      } catch {
+        continue;
+      }
+
+      if (exams.some((e) => e.examId === examId && e.timeLeft! > 0)) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   async getAttendanceSnapshot() {
@@ -249,7 +572,7 @@ export class RedisService implements OnModuleDestroy {
     // 🔹 2) Fetch attendance array (multi-exam structure)
     // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
     const attendanceRaw = await this.client.hGet('attendance', studentId);
-    console.log('attendanceRaw:', attendanceRaw);
+    //console.log('attendanceRaw:', attendanceRaw);
     // eslint-disable-next-line @typescript-eslint/no-redundant-type-constituents
     let attendance: any | null = null;
     let timeLeft = null;

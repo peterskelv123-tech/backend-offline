@@ -88,7 +88,6 @@ export abstract class BaseService<T extends ObjectLiteral> {
   const uniqueResults = Array.from(
     new Set(merged.map((r) => JSON.stringify(r))),
   ).map((str) => JSON.parse(str));
-
   return uniqueResults;
 }
 async findAll(manager?: EntityManager): Promise<T[]> {

@@ -11,6 +11,8 @@ import { Subject } from 'src/subjectModule/subject.entity';
 import { Class } from 'src/classModule/class.entity';
 import { Result } from 'src/resultModule/result.entity';
 import { Question } from 'src/QuestionModule/question.entity';
+import { createHash } from 'crypto';
+import { RedisService } from 'src/commonServices/Redis.service';
 @Injectable()
 export class ExamServices extends BaseService<Exam> {
   constructor(
@@ -23,62 +25,146 @@ export class ExamServices extends BaseService<Exam> {
     protected readonly dbHealth: DatabaseHealthService,
 
     protected readonly dataSource: DataSource,
+
+    protected readonly redisService: RedisService,
   ) {
     super(repo, dbHealth, dataSource);
   }
 
+  private async generateUniqueExamRoomID(examId: number): Promise<string> {
+  const examDetails = await this.repository.findOne({
+    where: { id: examId },
+    relations: ['class', 'subject'],
+  });
+
+  if (!examDetails) {
+    throw new Error(`Exam with ID ${examId} not found.`);
+  }
+
+  const className = examDetails.class?.Name ?? 'UnknownClass';
+  const subjectName = examDetails.subject?.Name ?? 'UnknownSubject';
+
+  const timestamp = Date.now();
+
+  // cryptographic part (5 chars)
+  const cryptoPart = createHash('sha256')
+    .update(`${examId}:${timestamp}:${process.env.ROOM_ID_SECRET}`)
+    .digest('base64url')
+    .slice(0, 5);
+
+  return `${className}_${subjectName}_${examId}_${cryptoPart}`;
+}
   /**
    * ✅ Get paginated exams or full list if <= 10
    */
-  async getPaginatedExams(page: number = 1, limit: number = 10) {
-    const total = await this.repository.count();
+  async findInvigilatorExamDetail(examID: number) {
 
-    // ✅ Return all exams without pagination when small dataset
-    if (total <= limit) {
-      const data = await this.repository
-        .createQueryBuilder('exam')
-        .leftJoinAndSelect('exam.subject', 'subject')
-        .leftJoinAndSelect('exam.class', 'class')
-        .select(['exam.id', 'subject.Name', 'class.Name', 'exam.timeAllocated', 'exam.status'])
-        .getMany();
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+  const data = await this.repository
+    .createQueryBuilder('exam')
+    .leftJoin('exam.subject', 'subject')
+    .leftJoin('exam.class', 'class')
+    .select([
+      'subject.name AS subject',
+      'class.name AS className',
+      'exam.session AS session',
+    ])
+    .where('exam.id = :examID', { examID })
+    .getRawOne();
 
-      return {
-        totalItems: total,
-        data: data.map((exam) => ({
-          id: exam.id,
-          subject: exam.subject.Name,
-          class: exam.class.Name,
-          timeAllocated: exam.timeAllocated,
-          status: exam.status,
-        })),
-        paginated: false,
-      };
-    }
+  if (!data) return null;
 
-    // ✅ Paginated flow
-    const [data, count] = await this.repository
-      .createQueryBuilder('exam')
-      .leftJoinAndSelect('exam.subject', 'subject')
-      .leftJoinAndSelect('exam.class', 'class')
-      .select(['exam.id', 'subject.Name', 'class.Name', 'exam.timeAllocated', 'exam.status'])
+  return {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
+    subject: data.subject,
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
+    className: data.className,
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
+    session: data.session,
+  };
+}
+
+async getPaginatedExams(
+  page: number = 1,
+  limit: number = 10,
+  filter: string = ""
+) {
+  // ✅ Count total items
+  const total = await this.repository.count();
+  //console.log("Filter:", filter);
+
+  // ✅ Build base query (same for both paginated and small dataset)
+  const query = this.repository
+    .createQueryBuilder('exam')
+    .leftJoinAndSelect('exam.subject', 'subject')
+    .leftJoinAndSelect('exam.class', 'examClass') // unified alias
+    .select([
+      'exam.id',
+      'exam.examType',
+      'subject.Name',
+      'examClass.Name',
+      'exam.timeAllocated',
+      'exam.status',
+    ]);
+
+  // ✅ Apply filter if exists
+  if (filter?.trim()) {
+  //console.log("Applying filter to query:", filter);
+
+  query.where(
+    '(LOWER(subject.Name) LIKE LOWER(:filter) OR LOWER(examClass.Name) LIKE LOWER(:filter) OR LOWER(exam.examType) LIKE LOWER(:filter))',
+    { filter: `%${filter}%` }
+  );
+}
+
+
+  let data: any[];
+  let count: number;
+
+  if (total <= limit) {
+    // 🔹 Small dataset: get all without pagination
+    data = await query.getMany();
+    count = data.length;
+  } else {
+    // 🔹 Paginated dataset
+    [data, count] = await query
       .skip((page - 1) * limit)
       .take(limit)
       .getManyAndCount();
-
-    return {
-      currentPage: page,
-      totalPages: Math.ceil(count / limit),
-      totalItems: count,
-      data: data.map((exam) => ({
-        id: exam.id,
-        subject: exam.subject.Name,
-        class: exam.class.Name,
-        timeAllocated: exam.timeAllocated,
-        status: exam.status,
-      })),
-      paginated: true,
-    };
   }
+
+  // ✅ Map data and attach roomId from Redis
+ //console.log("Raw DB data:", data);
+
+  const mappedData = await Promise.all(
+    data.map(async (exam) => ({
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
+      id: exam.id,
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
+      subject: exam.subject.Name,
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
+      class: exam.class.Name, // always use the correct property here
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
+      timeAllocated: exam.timeAllocated,
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
+      status: exam.status,
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
+      examType: exam.examType,
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access
+      roomId: (await this.redisService.getRoomByExam(exam.id)) ?? null,
+    }))
+  );
+
+  //console.log("Mapped Data:", mappedData);
+
+  return {
+    currentPage: page,
+    totalPages: total > limit ? Math.ceil(count / limit) : 1,
+    totalItems: count,
+    data: mappedData,
+    paginated: total > limit,
+  };
+}
 
   /**
    * ✅ Transactional delete: exams + questions + results
@@ -131,7 +217,6 @@ async deleteAnExamEntry(examID: number) {
 
       // ✅ Parse + Save questions (transaction-aware)
       await this.questionService.extractQuestionsFromFile(questionFile, savedExam, manager);
-
       return savedExam;
     });
   }
@@ -139,24 +224,64 @@ async deleteAnExamEntry(examID: number) {
   /**
    * ✅ Transaction-safe status update
    */
-  async updateExamStatus(examId: number, status: boolean) {
-    return await this.transactional(async (manager) => {
-      const examRepo = manager.getRepository(Exam);
-      const exam = await examRepo.findOne({ where: { id: examId } });
-      if (!exam) throw new Error(`Exam with ID ${examId} not found.`);
-      if(status===true && exam.classId){
-        const classActiveExams=await examRepo.find({ where:{classId:exam.classId,status:true}});
-       if(classActiveExams.length>0){
-     await examRepo.update(
-  { classId: exam.classId, status: true, id: Not(examId) },
-  { status: false }
-);
-       }
+  async updateExamStatus(examId: number, newStatus: boolean) {
+  return await this.transactional(async (manager) => {
+    const examRepo = manager.getRepository(Exam);
+
+    const exam = await examRepo.findOne({ where: { id: examId } });
+    if (!exam) {
+      throw new Error(`Exam with ID ${examId} not found.`);
+    }
+
+    // No-op protection
+    if (exam.status === newStatus) {
+      return exam;
+    }
+
+    // 🔼 INACTIVE → ACTIVE
+    if (newStatus === true) {
+      if (!exam.classId) {
+        throw new Error('Cannot activate exam without a class.');
       }
-      exam.status = status;
-      return await examRepo.save(exam);
-    });
-  }
+
+      // Deactivate other active exams in same class
+      const activeExams = await examRepo.find({
+        where: {
+          classId: exam.classId,
+          status: true,
+          id: Not(examId),
+        },
+      });
+
+      if (activeExams.length > 0) {
+  await examRepo.update(
+    { classId: exam.classId, status: true, id: Not(examId) },
+    { status: false }
+  );
+
+  await Promise.all(
+    activeExams.map((activeExam) =>
+      this.redisService.removeRoomByExam(activeExam.id)
+    )
+  );
+}
+
+
+      // Create room for this exam
+      const roomId = await this.generateUniqueExamRoomID(examId);
+      await this.redisService.createRoomForExam(examId, roomId, 24 * 60 * 60);
+    }
+
+    // 🔽 ACTIVE → INACTIVE
+    if (newStatus === false) {
+      await this.redisService.removeRoomByExam(examId);
+    }
+
+    exam.status = newStatus;
+    return await examRepo.save(exam);
+  });
+}
+
 
   /**
    * ✅ Get active exams not taken by student

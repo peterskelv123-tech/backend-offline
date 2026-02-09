@@ -16,10 +16,11 @@ private readonly examService: ExamServices,
   private readonly attendanceGateway: AttendanceGateway,
   ) { }
 @Get()
-async getExams(@Query('page') page?: number) {
+async getExams(@Query('page') page?: number,@Query('searchKey') searchKey?: string) {
   try {
     const pageNumber = page ? Number(page) : 1;
-    const exams = await this.examService.getPaginatedExams(pageNumber);
+    const exams = await this.examService.getPaginatedExams(pageNumber, 10,searchKey);
+    //console.log(exams);
     return this.responseService.success(
       exams,
       'Exams retrieved successfully',

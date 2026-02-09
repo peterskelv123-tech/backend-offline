@@ -5,16 +5,21 @@ import {
   ParseIntPipe,
   Post,
   Body,
+  Inject,
+  forwardRef,
 } from '@nestjs/common';
 import { RedisService } from './Redis.service';
 import { ResponseService } from './response.services';
 import { UpdateStudentProgressDto } from 'src/DTO/update_student_progress_dto';
+import { ExamServices } from 'src/examModule/exam.services';
 
 @Controller('redis')
 export class RedisController {
   constructor(
     private readonly redis: RedisService,
     private readonly response: ResponseService,
+    @Inject(forwardRef(() => ExamServices))
+    private readonly examService: ExamServices,
   ) {}
 
   // -------------------------------
@@ -80,7 +85,24 @@ export class RedisController {
       return this.response.error('Error fetching progress', 500);
     }
   }
+  @Post('invigilation')
+  async roomLogin(@Body() body: { userName: string; roomID: string }) {
+    try {
+      // Now this will throw if the room is invalid
+      const examId = await this.redis.getExamByRoom(body.roomID);
 
+      await this.redis.registerInvigilator(body.roomID, body.userName);
+
+      const data = await this.examService.findInvigilatorExamDetail(examId);
+      const mergedData = { ...data, examId };
+
+      return this.response.success(mergedData, 'Room login successful', 200);
+    } catch (err) {
+      // All invalid rooms and other errors end up here
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access
+      return this.response.error(err.message ?? 'An error occurred', 500);
+    }
+  }
   // -------------------------------
   // 3. Save Student Progress
   // -------------------------------
