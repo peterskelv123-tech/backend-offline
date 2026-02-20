@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/no-floating-promises */
 /* eslint-disable prettier/prettier */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
@@ -135,7 +136,7 @@ async handleDisconnect(client: Socket) {
       .map((s) => s.studentId)
       .filter((id) => !connectedStudentIds.includes(id));
 
-    console.log('👻 Ghost students:', ghosts);
+    //console.log('👻 Ghost students:', ghosts);
 
     // 4️⃣ Clean ghosts with helper
     if (ghosts.length > 0) {
@@ -223,7 +224,7 @@ async studentStatus(@MessageBody() data, @ConnectedSocket() client: Socket) {
   // ✅ This ensures that even if the student reconnects, we have their current socket
   this.studentSockets.set(studentId, client);
 
-  // 3️⃣ Send updates to invigilator (teacher) room
+ // 3️⃣ Send updates to invigilator (teacher) room
   const roomId = await this.redis.getRoomByExam(examId);
   if (roomId === null) {
     throw new Error("invalid room id");
@@ -357,7 +358,7 @@ async stopExam(@MessageBody() data: { studentId: string; examId: number }) {
     }
   })
 );
-      console.log(`👻 Marked ghost students inactive:`, ghosts);
+      //console.log(`👻 Marked ghost students inactive:`, ghosts);
     }
 
     // 6️⃣ Prepare final cleaned snapshot

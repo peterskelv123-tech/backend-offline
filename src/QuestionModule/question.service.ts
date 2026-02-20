@@ -1,16 +1,20 @@
+/* eslint-disable no-useless-escape */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 /* eslint-disable prettier/prettier */
 import { forwardRef, Inject, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, EntityManager, DataSource } from 'typeorm';
-import * as fs from 'fs';
 import mammoth from 'mammoth';
 import { Question } from './question.entity';
 import { BaseService } from 'src/commonServices/BaseServices';
 import { DatabaseHealthService } from 'src/commonServices/database-health.service';
-import { Exam } from '../examModule/exam.entity'; // ✅ adjust path as needed
+import JSZip from 'jszip';
+import fs from 'fs';
+import { DOMParser } from 'xmldom';
+//import { Exam } from '../examModule/exam.entity'; // ✅ adjust path as needed
 import { ExamServices } from 'src/examModule/exam.services';
 import { RedisService } from 'src/commonServices/Redis.service';
+import { Exam } from 'src/examModule/exam.entity';
 
 @Injectable()
 export class QuestionService extends BaseService<Question> {
@@ -32,123 +36,119 @@ export class QuestionService extends BaseService<Question> {
    * ✅ Works with OR without a transaction (optional manager)
    */
 async extractQuestionsFromFile(
-    filePath: string,
-    exam: Exam,
-    manager?: EntityManager, // ✅ our upgraded pattern
-  ): Promise<number> {
+  filePath: string,
+  exam: Exam,
+  manager?: EntityManager,
+) {
 
-    // ✅ Use transactional repo if provided
-    const repo = this.getRepo(manager);
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const repo = this.getRepo(manager);
 
-    // --- STEP 1: Extract text depending on file extension ---
-    const ext = filePath.split('.').pop()?.toLowerCase();
-    let text = '';
-
-    if (ext === 'docx') {
-      const result = await mammoth.extractRawText({ path: filePath });
-      text = result.value
-        .replace(/\r/g, '')
-        .replace(/\n+/g, '\n')
-        .replace(/(\d+)\./g, '\n$1.')
-        .replace(/([A-E])\)/g, '\n$1)')
-        .replace(/Answer\s*([A-Za-z])/gi, '\nAnswer: $1')
-        .replace(/^.*Progressive\s*Test.*$/gim, '')
-        .trim();
-    } else if (ext === 'pdf') {
-      const pdfModule = await import('pdf-parse');
-      const pdfParse =
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-        (pdfModule as any).default ?? (pdfModule as any);
-
-      const buffer = fs.readFileSync(filePath);
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-call
-      const result = await pdfParse(buffer);
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-      text = result.text ?? '';
-    } else {
-      throw new Error('Unsupported file format. Only .docx or .pdf allowed.');
-    }
-
-    // --- STEP 2: Parse questions ---
-    const questions = this.parseQuestions(text);
-console.log('Parsed Questions:', questions.length);
-    if (questions.length === 0) {
-      throw new Error('No valid questions found in the file.');
-    }
-
-    // Handle limit
-    const maxQuestions = Number(exam.totalQuestions) || questions.length;
-    if(maxQuestions>questions.length){
-      throw new Error(" question bank has to contain more or equal questions to what students are to answer")
-    }
-    
-    // --- STEP 3: Save questions (transaction optional) ---
-    await repo.save(
-      questions.map((q) => ({
-        ...q,
-        examId: exam.id,
-      })),
-    );
-
-    return questions.length;
+  const ext = filePath.split('.').pop()?.toLowerCase();
+  if (ext !== 'docx') {
+    throw new Error('Only DOCX files are supported.');
   }
+
+  // ⚠️ Temporary: plain-text extraction only
+  const result = await mammoth.extractRawText({ path: filePath });
+
+  const text = result.value
+    .replace(/\r/g, '')
+    .replace(/\n{2,}/g, '\n')
+    .replace(/(\d+)\./g, '\n$1.')
+    .replace(/([A-E])\)/g, '\n$1)')
+    // eslint-disable-next-line no-useless-escape
+    .replace(/Answer\s*[:\-]?\s*([A-E])/gi, '\nAnswer: $1')
+    .replace(/^.*Progressive\s*Test.*$/gim, '')
+    .trim();
+
+  const questions = this.parseQuestions(text);
+ //console.log(questions);
+  if (questions.length === 0) {
+    throw new Error('No valid questions found in the file.');
+  }
+
+  const maxQuestions = Number(exam.totalQuestions) || questions.length;
+  if (maxQuestions > questions.length) {
+    throw new Error(
+      'Question bank must contain at least the total exam questions.',
+    );
+  }
+
+  await repo.save(
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+    questions.map(q => ({
+      ...q,
+      examId: exam.id,
+    })),
+  );
+ //console.log(questions.length)
+  return questions.length;
+}
 
   /**
    * Parses extracted text.
    */
-  private parseQuestions(
-    text: string
-  ): { question: string; options: string[]; correctAnswer: string }[] {
-    const normalized = text
-      .replace(/\r/g, '')
-      .replace(/\n+/g, '\n')
-      .replace(/\s{2,}/g, ' ')
-      .replace(/([A-E])\)/g, '\n$1)')
-      .replace(/Answer\s*([A-Za-z])/gi, '\nAnswer: $1')
+private parseQuestions(text: string) {
+  const questions:{question:string,options:any[],correctAnswer:any}[] = [];
+
+  // 1️⃣ Normalize
+  const normalized = text
+    .replace(/\r/g, '')
+    .replace(/\n{2,}/g, '\n')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
+  // 2️⃣ Split by ANSWER (this is the key)
+  const chunks = normalized.split(
+    /(?:Answer|Correct Answer|Ans)\s*[:\-]?\s*[A-E]/gi
+  );
+
+  // 3️⃣ Extract answer letters separately
+  const answers = [...normalized.matchAll(
+    /(Answer|Correct Answer|Ans)\s*[:\-]?\s*([A-E])/gi
+  )].map(m => m[2].toUpperCase());
+
+  chunks.forEach((chunk, index) => {
+    const clean = chunk
+      .replace(/^\d+\.\s*/, '')
       .trim();
 
-    const questionBlocks = normalized
-      .split(/Answer:\s*[A-Za-z]/gi)
-      .filter((b) => b.trim().length > 0);
+    if (!clean) return;
 
-    const answerLetters = [
-      ...normalized.matchAll(/Answer:\s*([A-Za-z])/gi),
-    ].map((m) => m[1].toUpperCase());
+    const optionMatches = [...clean.matchAll(
+      /([A-E])[.)]\s*(.+?)(?=[A-E][.)]|$)/gs
+    )];
 
-    const questions: { question: string; options: string[]; correctAnswer: string }[] = [];
+    if (optionMatches.length < 2) return;
 
-    questionBlocks.forEach((block, index) => {
-      const answerLetter = answerLetters[index];
+    const options = optionMatches.map(o => o[2].trim());
 
-      const questionMatch = block.match(/^(.*?)\s*[A-E]\)/s);
-      let question = questionMatch
-        ? questionMatch[1].replace(/\n/g, ' ').trim()
-        : block.split(/[A-E]\)/)[0]?.trim() ?? '';
+    const question = clean.slice(
+      0,
+      optionMatches[0].index
+    ).trim();
 
-      // remove leading numbers "1. "
-      question = question.replace(/^\d+\.\s*/, '');
+    if (!question) return;
 
-      const options =
-        block
-          .match(/[A-E]\)\s*([^\n]+)/gi)
-          ?.map((opt) => opt.replace(/[A-E]\)\s*/, '').trim())
-          ?? [];
+    let correctAnswer = '';
+    const letter = answers[index];
+    if (letter) {
+      const idx = letter.charCodeAt(0) - 65;
+      if (options[idx]) correctAnswer = options[idx];
+    }
 
-      let correctAnswer = '';
-      if (answerLetter && options.length > 0) {
-        const idx = answerLetter.charCodeAt(0) - 65;
-        if (idx >= 0 && idx < options.length) {
-          correctAnswer = options[idx];
-        }
-      }
-
-      if (question && options.length) {
-        questions.push({ question, options, correctAnswer });
-      }
+    questions.push({
+      question,
+      options,
+      correctAnswer,
     });
+  });
 
-    return questions;
-  }
+  return questions;
+}
+
+
 
   /**
    * Get questions for exam taker (randomized).
@@ -198,5 +198,43 @@ async examTakerQuestions(examId: number, studentId: string) {
 
   // 8️⃣ Combine previously answered with newly selected questions
   return [...(record?.questionMeta ?? []), ...shuffledNew];
+}
+async extractDocxWithFormulas(filePath: string) {
+  const buffer = fs.readFileSync(filePath);
+  const zip = await JSZip.loadAsync(buffer);
+
+  const xml = await zip.file('word/document.xml')?.async('text');
+  if (!xml) throw new Error('Invalid DOCX');
+
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+  const doc = new DOMParser().parseFromString(xml, 'text/xml');
+
+  let formulaIndex = 0;
+  const formulas: Record<string, string> = {};
+
+  // Find all math nodes
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+  const mathNodes = doc.getElementsByTagName('m:oMathPara');
+
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+  for (let i = 0; i < mathNodes.length; i++) {
+    const placeholder = `{{FORMULA_${++formulaIndex}}}`;
+
+    // TEMP: store raw XML for now
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    formulas[placeholder] = mathNodes[i].toString();
+
+    // Replace math node with placeholder text
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    const textNode = doc.createTextNode(placeholder);
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    mathNodes[i].parentNode?.replaceChild(textNode, mathNodes[i]);
+  }
+
+  // Extract remaining text content
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+  const text = doc.documentElement.textContent ?? '';
+
+  return { text, formulas };
 }
 }

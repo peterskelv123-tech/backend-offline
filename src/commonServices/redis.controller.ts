@@ -70,7 +70,7 @@ export class RedisController {
           200,
         );
       }
-      console.log('retrieved data:', moreDetails);
+      // console.log('retrieved data:', moreDetails);
       return this.response.success(
         {
           ...progress,
@@ -111,7 +111,7 @@ export class RedisController {
     @Body()
     body: UpdateStudentProgressDto,
   ) {
-    console.log('Incoming progress:', body);
+    //console.log('Incoming progress:', body);
     const { studentId, examId, progress } = body;
 
     // Basic validation

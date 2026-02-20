@@ -3,6 +3,7 @@ import { forwardRef, Inject, Injectable } from '@nestjs/common';
 import { BaseService } from 'src/commonServices/BaseServices';
 import { Exam } from './exam.entity';
 import { InjectRepository } from '@nestjs/typeorm';
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 import { DataSource, Not, Repository } from 'typeorm';
 import { DatabaseHealthService } from 'src/commonServices/database-health.service';
 import { QuestionService } from 'src/QuestionModule/question.service';
@@ -83,58 +84,76 @@ export class ExamServices extends BaseService<Exam> {
     session: data.session,
   };
 }
+async getAllSessions() {
+  return this.getDistinctField('session');
+}
+
+async getAllTerms() {
+  return this.getDistinctField('term');
+}
+
+async getAllExamTypes() {
+  return this.getDistinctField('examType');
+}
 
 async getPaginatedExams(
   page: number = 1,
   limit: number = 10,
-  filter: string = ""
+  filter: string = "",
+  session: string = "",
+  term: string = "",
+  examType: string = ""
 ) {
-  // ✅ Count total items
   const total = await this.repository.count();
-  //console.log("Filter:", filter);
 
-  // ✅ Build base query (same for both paginated and small dataset)
   const query = this.repository
     .createQueryBuilder('exam')
     .leftJoinAndSelect('exam.subject', 'subject')
-    .leftJoinAndSelect('exam.class', 'examClass') // unified alias
+    .leftJoinAndSelect('exam.class', 'examClass')
     .select([
       'exam.id',
-      'exam.examType',
       'subject.Name',
       'examClass.Name',
       'exam.timeAllocated',
       'exam.status',
     ]);
 
-  // ✅ Apply filter if exists
+  /* 🔍 Generic search filter */
   if (filter?.trim()) {
-  //console.log("Applying filter to query:", filter);
+    query.where(
+      `(
+        LOWER(subject.Name) LIKE LOWER(:filter)
+        OR LOWER(examClass.Name) LIKE LOWER(:filter)
+      )`,
+      { filter: `%${filter}%` }
+    );
+  }
 
-  query.where(
-    '(LOWER(subject.Name) LIKE LOWER(:filter) OR LOWER(examClass.Name) LIKE LOWER(:filter) OR LOWER(exam.examType) LIKE LOWER(:filter))',
-    { filter: `%${filter}%` }
-  );
-}
+  /* 🎯 Optional exact filters */
+  if (session?.trim()) {
+    query.andWhere('exam.session = :session', { session });
+  }
 
+  if (term?.trim()) {
+    query.andWhere('exam.term = :term', { term });
+  }
+
+  if (examType?.trim()) {
+    query.andWhere('exam.examType = :examType', { examType });
+  }
 
   let data: any[];
   let count: number;
 
   if (total <= limit) {
-    // 🔹 Small dataset: get all without pagination
     data = await query.getMany();
     count = data.length;
   } else {
-    // 🔹 Paginated dataset
     [data, count] = await query
       .skip((page - 1) * limit)
       .take(limit)
       .getManyAndCount();
   }
-
-  // ✅ Map data and attach roomId from Redis
- //console.log("Raw DB data:", data);
 
   const mappedData = await Promise.all(
     data.map(async (exam) => ({
@@ -143,19 +162,15 @@ async getPaginatedExams(
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
       subject: exam.subject.Name,
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
-      class: exam.class.Name, // always use the correct property here
+      class: exam.class.Name,
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
       timeAllocated: exam.timeAllocated,
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
       status: exam.status,
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
-      examType: exam.examType,
       // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access
       roomId: (await this.redisService.getRoomByExam(exam.id)) ?? null,
     }))
   );
-
-  //console.log("Mapped Data:", mappedData);
 
   return {
     currentPage: page,
@@ -165,7 +180,6 @@ async getPaginatedExams(
     paginated: total > limit,
   };
 }
-
   /**
    * ✅ Transactional delete: exams + questions + results
    */
@@ -202,6 +216,8 @@ async deleteAnExamEntry(examID: number) {
       }
 
       // ✅ Create new exam
+      
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const exam = examRepo.create({
         examType: examDetails.examType,
         session: examDetails.session,
@@ -216,7 +232,7 @@ async deleteAnExamEntry(examID: number) {
       const savedExam = await examRepo.save(exam);
 
       // ✅ Parse + Save questions (transaction-aware)
-      await this.questionService.extractQuestionsFromFile(questionFile, savedExam, manager);
+      await this.questionService.extractQuestionsFromFile(questionFile,savedExam, manager);
       return savedExam;
     });
   }
@@ -224,6 +240,15 @@ async deleteAnExamEntry(examID: number) {
   /**
    * ✅ Transaction-safe status update
    */
+  async examCleanup(): Promise<void> {
+  await this.repository.update(
+    { status: true },
+    { status: false },
+  );
+
+  await this.redisService.clearAllRedis();
+}
+
   async updateExamStatus(examId: number, newStatus: boolean) {
   return await this.transactional(async (manager) => {
     const examRepo = manager.getRepository(Exam);
@@ -245,26 +270,26 @@ async deleteAnExamEntry(examID: number) {
       }
 
       // Deactivate other active exams in same class
-      const activeExams = await examRepo.find({
-        where: {
-          classId: exam.classId,
-          status: true,
-          id: Not(examId),
-        },
-      });
+//       const activeExams = await examRepo.find({
+//         where: {
+//           classId: exam.classId,
+//           status: true,
+//           id: Not(examId),
+//         },
+//       });
 
-      if (activeExams.length > 0) {
-  await examRepo.update(
-    { classId: exam.classId, status: true, id: Not(examId) },
-    { status: false }
-  );
+//       if (activeExams.length > 0) {
+//   await examRepo.update(
+//     { classId: exam.classId, status: true, id: Not(examId) },
+//     { status: false }
+//   );
 
-  await Promise.all(
-    activeExams.map((activeExam) =>
-      this.redisService.removeRoomByExam(activeExam.id)
-    )
-  );
-}
+//   await Promise.all(
+//     activeExams.map((activeExam) =>
+//       this.redisService.removeRoomByExam(activeExam.id)
+//     )
+//   );
+// }
 
 
       // Create room for this exam
@@ -281,53 +306,91 @@ async deleteAnExamEntry(examID: number) {
     return await examRepo.save(exam);
   });
 }
-
-
   /**
    * ✅ Get active exams not taken by student
    */
-  async TakeAnExam(className: string, regNo: string) {
-    const classRepo = this.dataSource.getRepository(Class);
-    const examRepo = this.dataSource.getRepository(Exam);
-    const resultRepo = this.dataSource.getRepository(Result);
+ async TakeAnExam(className: string, regNo: string) {
+  const classRepo = this.dataSource.getRepository(Class);
+  const examRepo = this.dataSource.getRepository(Exam);
+  const resultRepo = this.dataSource.getRepository(Result);
 
-    // 1️⃣ Class lookup
-    const classDetail = await classRepo.findOne({ where: { Name: className } });
-    if (!classDetail) throw new Error(`Class '${className}' is not registered.`);
-
-    // 2️⃣ Fetch active exams
-    const activeExams = await examRepo
-      .createQueryBuilder('exam')
-      .leftJoinAndSelect('exam.class', 'class')
-      .leftJoinAndSelect('exam.subject', 'subject')
-      .where('exam.classId = :id', { id: classDetail.id })
-      .andWhere('exam.status = true')
-      .getMany();
-
-    if (activeExams.length === 0) {
-      throw new Error(`No active exams found for class ${className}.`);
-    }
-
-    // 3️⃣ Find exams already taken by the student
-    const takenExams = await resultRepo.find({ where: { regNo }, relations: ['exam'] });
-    const takenIds = takenExams.map((t) => t.exam?.id).filter(Boolean);
-
-    // 4️⃣ Filter exams the student hasn't taken
-    const examsToTake = activeExams.filter((exam) => !takenIds.includes(exam.id));
-
-    if (examsToTake.length === 0) {
-      throw new Error("You've taken all active exams for your class.");
-    }
-
-    // 5️⃣ Format response
-    return examsToTake.map((exam) => ({
-      id: exam.id,
-      subject: exam.subject?.Name ?? 'Unknown',
-      type: exam.examType,
-      session: exam.session,
-      term: exam.term,
-      class: exam.class?.Name ?? 'Unknown',
-      timeAllocated: exam.timeAllocated,
-    }));
+  // 1️⃣ Class lookup
+  const classDetail = await classRepo.findOne({ where: { Name: className } });
+  if (!classDetail) {
+    throw new Error(`Class '${className}' is not registered.`);
   }
+
+  // 2️⃣ Fetch active exams
+  const activeExams = await examRepo
+    .createQueryBuilder('exam')
+    .leftJoinAndSelect('exam.class', 'class')
+    .leftJoinAndSelect('exam.subject', 'subject')
+    .where('exam.classId = :id', { id: classDetail.id })
+    .andWhere('exam.status = true')
+    .getMany();
+
+  if (activeExams.length === 0) {
+    throw new Error(`No active exams found for class ${className}.`);
+  }
+
+  // 3️⃣ Exams already taken
+  const takenExams = await resultRepo.find({
+    where: { regNo },
+    relations: ['exam'],
+  });
+
+  const takenIds = takenExams
+    .map((t) => t.exam?.id)
+    .filter(Boolean);
+
+  // 4️⃣ Filter remaining exams
+  const examsToTake = activeExams.filter(
+    (exam) => !takenIds.includes(exam.id),
+  );
+
+  if (examsToTake.length === 0) {
+    throw new Error("You've taken all active exams for your class.");
+  }
+
+  // 5️⃣ Format response (STRICT time contract)
+  return Promise.all(
+    examsToTake.map(async (exam) => {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+      const studentRecord =
+        await this.redisService.getStudentAttendanceSnapshot(
+          regNo,
+          exam.id,
+        );
+
+      // 🔒 HARD GUARD — never silently reset time
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      if (studentRecord && typeof studentRecord.timeLeft !== 'number') {
+        throw new Error(
+          `Invalid attendance state: timeLeft missing for exam ${exam.id}`,
+        );
+      }
+
+      return {
+        id: exam.id,
+        subject: exam.subject?.Name ?? 'Unknown',
+        type: exam.examType,
+        session: exam.session,
+        term: exam.term,
+        class: exam.class?.Name ?? 'Unknown',
+
+        // always config, never mutated
+        durationSeconds: exam.timeAllocated * 60,
+
+        // runtime state ONLY if started
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        remainingSeconds: studentRecord
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+          ? studentRecord.timeLeft
+          : null,
+        hasStarted: Boolean(studentRecord),
+      };
+    }),
+  );
+}
+
 }

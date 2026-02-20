@@ -15,11 +15,72 @@ private readonly examService: ExamServices,
   private readonly redis: RedisService,
   private readonly attendanceGateway: AttendanceGateway,
   ) { }
-@Get()
-async getExams(@Query('page') page?: number,@Query('searchKey') searchKey?: string) {
+@Get('exam-types')
+async getExamTypes() {
+  try {
+    const examTypes = await this.examService.getAllExamTypes();
+    return this.responseService.success(
+      examTypes,
+      'Exam types retrieved successfully',
+      200,
+    );
+  } catch (error) {
+    return this.responseService.error(
+      (error as Error).message ?? 'Failed to retrieve exam types',
+      500,
+    );
+  }
+}
+ @Post('cleanup')
+async examCleanup() {
+  console.log("clean up recieved from frontend")
+  await this.examService.examCleanup();
+  return { success: true };
+}
+
+@Get('terms')
+async getTerms() {
+  try {
+    const terms = await this.examService.getAllTerms();
+    return this.responseService.success(
+      terms,
+      'Terms retrieved successfully',
+      200,
+    );
+  } catch (error) {
+    return this.responseService.error(
+      (error as Error).message ?? 'Failed to retrieve terms',
+      500,
+    );
+  }
+}
+@Get('exam-active-sessions')
+async getActiveExamSessions() {
+  try{
+    const activeSessions = await this.examService.getAllSessions();
+    return this.responseService.success(
+      activeSessions,
+      'Active exam sessions retrieved successfully',
+      200,
+    );
+}catch(error){
+  return this.responseService.error(
+    (error as Error).message ?? 'Failed to retrieve active exam sessions',
+    500,
+  );
+}}
+  @Get()
+async getExams(
+  @Query('page') page?: number
+,@Query('searchKey') searchKey?: string,
+@Query('session') session?: string
+,@Query('term') term?: string,
+@Query('examType') examType?: string
+) {
+  console.log('Received query parameters:', { page, searchKey, session, term, examType });
   try {
     const pageNumber = page ? Number(page) : 1;
-    const exams = await this.examService.getPaginatedExams(pageNumber, 10,searchKey);
+    const exams = await this.examService.getPaginatedExams(pageNumber, 10,searchKey,session,term,examType);
     //console.log(exams);
     return this.responseService.success(
       exams,

@@ -473,6 +473,37 @@ export class RedisService implements OnModuleDestroy {
 
     return snapshot;
   }
+  // fetch attendance detail of a single student
+  async getStudentAttendanceSnapshot(studentId: string, examId: number) {
+    // Fetch only this student's attendance list
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+    const json = await this.client.hGet('attendance', studentId);
+
+    if (!json) return null;
+
+    let attendanceList: any[] = [];
+
+    try {
+      const parsed = JSON.parse(json);
+      attendanceList = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return null;
+    }
+
+    // Find the exam entry
+    const entry = attendanceList.find((item) => item.examId === examId);
+
+    if (!entry) return null;
+
+    return {
+      ...entry,
+      studentId,
+      timeLeft:
+        entry.timeLeft !== undefined
+          ? Math.max(0, Math.floor(Number(entry.timeLeft)))
+          : null,
+    };
+  }
 
   // ✅ Remove one student
   async removeStudent(studentId: string, examId?: number) {
@@ -575,7 +606,7 @@ export class RedisService implements OnModuleDestroy {
     //console.log('attendanceRaw:', attendanceRaw);
     // eslint-disable-next-line @typescript-eslint/no-redundant-type-constituents
     let attendance: any | null = null;
-    let timeLeft = null;
+    //let timeLeft = null;
     let active = null;
 
     try {
@@ -590,7 +621,7 @@ export class RedisService implements OnModuleDestroy {
 
         if (examEntry) {
           // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-          timeLeft = examEntry.timeLeft ?? null;
+          //timeLeft = examEntry.timeLeft ?? null;
           // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
           active = examEntry.active ?? null;
         }
@@ -606,9 +637,13 @@ export class RedisService implements OnModuleDestroy {
       questionMeta,
       totalQuestionsAnswered: answers.length,
       attendance: attendance ? attendance : [],
-      timeLeft,
+      //timeLeft,
       active,
     };
+  }
+  async clearAllRedis(): Promise<void> {
+    // ⚠️ Deletes ALL keys in the current Redis database
+    await this.client.flushDb();
   }
 
   async removeStudentIfFinished(
@@ -616,7 +651,6 @@ export class RedisService implements OnModuleDestroy {
     examId: number,
     examTotalQuestions: number,
   ) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
     const json = await this.client.hGet('attendance', studentId);
     if (!json) return null;
 
@@ -627,35 +661,37 @@ export class RedisService implements OnModuleDestroy {
       return null;
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
     const index = list.findIndex((e) => e.examId === examId);
     if (index === -1) return null;
 
     const entry = list[index];
 
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-    const finishedByTime = entry.timeLeft <= 0;
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+    const finishedByTime = (entry.timeLeft ?? 0) <= 0;
     const finishedByQuestions = (entry.answered ?? 0) >= examTotalQuestions;
 
+    // If exam is fully finished, remove from attendance and delete progress
     if (finishedByTime || finishedByQuestions) {
-      // Remove only this exam
       await this.setAttendance(studentId, { examId }, 'remove');
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      await this.client.hDel(`progress:${examId}:${studentId}`);
+
+      // Correct Redis HDEL usage
+      const progressKey = `progress:${examId}:${studentId}`;
+      await this.client.del(progressKey);
+
       return true;
     }
 
-    // 🔥 This is important:
-    // Modify the FULL entry, then send FULL entry back.
+    // Ensure all fields are defined (never write undefined to Redis!)
     const updatedEntry = {
-      ...entry,
+      examId: entry.examId,
+      timeLeft: entry.timeLeft ?? 0,
+      answered: entry.answered ?? 0,
       active: false,
     };
 
     await this.setAttendance(studentId, updatedEntry);
     return false;
   }
+
   async saveProgress(
     studentId: string,
     examId: number,

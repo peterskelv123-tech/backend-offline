@@ -90,6 +90,35 @@ export abstract class BaseService<T extends ObjectLiteral> {
   ).map((str) => JSON.parse(str));
   return uniqueResults;
 }
+protected async getDistinctField(
+  field: keyof T & string,
+  manager?: EntityManager,
+): Promise<string[]> {
+  await this.dbHealth.ensureConnection();
+
+  // 🔐 Defensive: validate column exists on entity
+  const validColumns = this.repository.metadata.columns.map(
+    (c) => c.propertyName,
+  );
+
+  if (!validColumns.includes(field)) {
+    throw new Error(`Invalid distinct field: ${field}`);
+  }
+
+  const repo = this.getRepo(manager);
+
+  const rows = await repo
+    .createQueryBuilder('entity')
+    .select(`DISTINCT entity.${field}`, field)
+    .where(`entity.${field} IS NOT NULL`)
+    .andWhere(`entity.${field} != ''`)
+    .orderBy(`entity.${field}`, 'ASC')
+    .getRawMany();
+
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+  return rows.map((r) => r[field]);
+}
+
 async findAll(manager?: EntityManager): Promise<T[]> {
   await this.dbHealth.ensureConnection();
   return await this.getRepo(manager).find();
