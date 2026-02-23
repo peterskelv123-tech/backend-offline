@@ -85,7 +85,7 @@ export class RedisController {
       return this.response.error('Error fetching progress', 500);
     }
   }
-  @Post('invigilation')
+  /*@Post('invigilation')
   async roomLogin(@Body() body: { userName: string; roomID: string }) {
     try {
       // Now this will throw if the room is invalid
@@ -102,7 +102,7 @@ export class RedisController {
       // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access
       return this.response.error(err.message ?? 'An error occurred', 500);
     }
-  }
+  }*/
   // -------------------------------
   // 3. Save Student Progress
   // -------------------------------

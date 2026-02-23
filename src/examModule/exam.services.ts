@@ -155,8 +155,7 @@ async getPaginatedExams(
       .getManyAndCount();
   }
 
-  const mappedData = await Promise.all(
-    data.map(async (exam) => ({
+  const mappedData = data.map((exam) => ({
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
       id: exam.id,
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
@@ -167,10 +166,7 @@ async getPaginatedExams(
       timeAllocated: exam.timeAllocated,
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
       status: exam.status,
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access
-      roomId: (await this.redisService.getRoomByExam(exam.id)) ?? null,
     }))
-  );
 
   return {
     currentPage: page,
@@ -293,14 +289,14 @@ async deleteAnExamEntry(examID: number) {
 
 
       // Create room for this exam
-      const roomId = await this.generateUniqueExamRoomID(examId);
-      await this.redisService.createRoomForExam(examId, roomId, 24 * 60 * 60);
+      //const roomId = await this.generateUniqueExamRoomID(examId);
+      //await this.redisService.createRoomForExam(examId, roomId, 24 * 60 * 60);
     }
 
     // 🔽 ACTIVE → INACTIVE
-    if (newStatus === false) {
+    /*if (newStatus === false) {
       await this.redisService.removeRoomByExam(examId);
-    }
+    }*/
 
     exam.status = newStatus;
     return await examRepo.save(exam);

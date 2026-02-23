@@ -12,6 +12,7 @@ import {
 import { Server, Socket } from 'socket.io';
 import { RedisService } from 'src/commonServices/Redis.service';
 import { ExamServices } from 'src/examModule/exam.services';
+import { MediasoupService } from 'src/mediaSoup/mediaSoupService';
 @WebSocketGateway({
   cors: { origin: '*' },
 })
@@ -22,6 +23,7 @@ export class AttendanceGateway {
   constructor(
     private redis: RedisService,
     private exam: ExamServices,
+    private mediaSoup: MediasoupService,
   ) {}
   private studentSockets = new Map<string, Socket>();
   // ✅ Logs raw disconnect events from socket.io
@@ -129,7 +131,19 @@ async handleDisconnect(client: Socket) {
 
     // 2️⃣ Get real currently connected studentIds
     const connectedStudentIds = this.getConnectedStudents();
-
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access
+    const activeStudents = snapshot.filter((s) => connectedStudentIds.includes(s.studentId) && s.producerId);
+     for (const student of activeStudents) {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access
+    const transport = await this.mediaSoup.createConsumerTransport();
+    client.emit('new-student-stream', {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      studentId: student.studentId,
+      transport,
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      producerId: student.producerId,
+    });
+  }
     // 3️⃣ Ghosts = in redis but not connected
     const ghosts = snapshot
       // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-member-access
@@ -225,14 +239,14 @@ async studentStatus(@MessageBody() data, @ConnectedSocket() client: Socket) {
   this.studentSockets.set(studentId, client);
 
  // 3️⃣ Send updates to invigilator (teacher) room
-  const roomId = await this.redis.getRoomByExam(examId);
+  /*const roomId = await this.redis.getRoomByExam(examId);
   if (roomId === null) {
     throw new Error("invalid room id");
-  }
+  }*/
 
-  const student_invigilator = await this.redis.getInvigilatorByStudent(roomId, studentId);
+  /*const student_invigilator = await this.redis.getInvigilatorByStudent(roomId, studentId);
   console.log(`⏳ Updated status for ${studentId} in exam ${examId}`);
-  this.server.to(`${student_invigilator}_room`).emit('student-update', data);
+  this.server.to(`${student_invigilator}_room`).emit('student-update', data);*/
 
   // 4️⃣ Admin snapshot update
   if (await this.redis.isAdminOnline()) {

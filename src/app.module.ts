@@ -11,6 +11,7 @@ import { ResultModule } from './resultModule';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AppDataSource } from 'data-source';
+import { MediasoupModule } from './mediaSoup/mediaSoupModule';
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -23,6 +24,7 @@ import { AppDataSource } from 'data-source';
     SubjectModule,
     ClassModule,
     QuestionModule,
+    MediasoupModule,
     ExamModule,
     ResultModule,
   ],
