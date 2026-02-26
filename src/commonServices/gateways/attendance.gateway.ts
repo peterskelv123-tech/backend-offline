@@ -220,13 +220,64 @@ async studentJoin(@MessageBody() data, @ConnectedSocket() client) {
   if (await this.redis.isAdminOnline()) {
     // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
     const snapshot = (await this.redis.getAttendanceSnapshot()).filter(it => it.active);
-    this.server.to('admin-room').emit('attendance-update', snapshot);
+    const producers = this.mediaSoup.getAllProducers();
+    const enrichedSnapshot = snapshot.map((student) => {
+  const studentProducers = producers.filter(
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+    (p) => p.studentId === student.studentId,
+  );
+
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+  return {
+    ...student,
+    producers: {
+      video: studentProducers.find((p) => p.kind === 'video')?.producerId,
+      audio: studentProducers.find((p) => p.kind === 'audio')?.producerId,
+    },
+  };
+});
+this.server.to('admin-room').emit('attendance-update', enrichedSnapshot);
   }
 
   return { ok: true };
 }
+private async buildEnrichedSnapshot() {
+  const snapshot = (await this.redis.getAttendanceSnapshot()).filter(
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+    (it) => it.active,
+  );
 
-  // ✅ STUDENT LIVE STATUS UPDATE
+  const activeStudentIds = new Set(
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-member-access
+    snapshot.map((s) => s.studentId),
+  );
+
+  const producers = this.mediaSoup.getAllProducers();
+
+  // 🔥 CLEANUP: remove producers for inactive students
+  for (const p of producers) {
+    if (!activeStudentIds.has(p.studentId)) {
+      this.mediaSoup.removeProducersByStudent(p.studentId);
+    }
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+  return snapshot.map((student) => {
+    const studentProducers = producers.filter(
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      (p) => p.studentId === student.studentId,
+    );
+
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+    return {
+      ...student,
+      producers: {
+        video: studentProducers.find((p) => p.kind === 'video')?.producerId,
+        audio: studentProducers.find((p) => p.kind === 'audio')?.producerId,
+      },
+    };
+  });
+}  // ✅ STUDENT LIVE STATUS UPDATE
  @SubscribeMessage('student-status')
 async studentStatus(@MessageBody() data, @ConnectedSocket() client: Socket) {
   const { studentId, examId } = data;
@@ -250,11 +301,7 @@ async studentStatus(@MessageBody() data, @ConnectedSocket() client: Socket) {
 
   // 4️⃣ Admin snapshot update
   if (await this.redis.isAdminOnline()) {
-    const snapshot = (await this.redis.getAttendanceSnapshot()).filter(
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-      (it) => it.active,
-    );
-    this.server.to('admin-room').emit('attendance-update', snapshot);
+    this.server.to('admin-room').emit('attendance-update', await this.buildEnrichedSnapshot());
   }
 }
 
@@ -296,7 +343,7 @@ async stopExam(@MessageBody() data: { studentId: string; examId: number }) {
   // 5️⃣ Update admin dashboard
   if (await this.redis.isAdminOnline()) {
     // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-    const snapshot = (await this.redis.getAttendanceSnapshot()).filter((it) => it.active);
+    const snapshot = await this.buildEnrichedSnapshot();
     this.server.to('admin-room').emit('attendance-update', snapshot);
   }
 
@@ -376,10 +423,7 @@ async stopExam(@MessageBody() data: { studentId: string; examId: number }) {
     }
 
     // 6️⃣ Prepare final cleaned snapshot
-    const finalSnapshot = (await this.redis.getAttendanceSnapshot()).filter(
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-      (it) => it.active,
-    );
+    const finalSnapshot = await this.buildEnrichedSnapshot();
 
     // 7️⃣ If admin is online, send cleaned snapshot
     if (await this.redis.isAdminOnline()) {
