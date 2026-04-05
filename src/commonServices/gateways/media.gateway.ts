@@ -8,6 +8,7 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { MediasoupService } from 'src/mediaSoup/mediaSoupService';
+import { AttendanceService } from '../AttendanceService';
 
 @WebSocketGateway({
   cors: {
@@ -20,7 +21,10 @@ export class MediaGateway {
   @WebSocketServer()
   private server: Server;
 
-  constructor(private readonly mediasoup: MediasoupService) {}
+  constructor(
+    private readonly mediasoup: MediasoupService,
+    private attendanceService: AttendanceService,
+  ) {}
 
   // --------------------------------------------------
   // Health check
@@ -110,33 +114,33 @@ export class MediaGateway {
       studentId: string;
     },
   ) {
-    console.log('🎬 student-produce called:', {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+    const { studentId, kind, transportId, rtpParameters } = data;
+
+    console.log('🎬 student-produce:', {
       socket: client.id,
-      studentId: data.studentId,
-      kind: data.kind,
-      transportId: data.transportId,
+      studentId,
+      kind,
     });
 
-    // ✅ PASS studentId INTO mediasoup service
+    // ✅ Produce (this now handles replacement internally)
     const { producerId } = await this.mediasoup.produce(
-      data.transportId,
-      data.kind,
-      data.rtpParameters,
-      data.studentId,
+      transportId,
+      kind,
+      rtpParameters,
+      studentId,
     );
 
     console.log(
-      `🎬 Producer created → id=${producerId}, kind=${data.kind}, student=${data.studentId}`,
+      `🎬 Active producer → ${producerId} (${kind}) for ${studentId}`,
     );
 
-    // ✅ Notify all admins (live + future replay-safe)
+    // ✅ 🔥 Notify admins with SPECIFIC event (NOT snapshot)
     this.server.to('admin-room').emit('new-student-producer', {
-      studentId: data.studentId,
+      studentId,
       producerId,
-      kind: data.kind,
+      kind,
     });
-
-    console.log('📡 Notified admin-room of new producer:', producerId);
 
     return { producerId };
   }

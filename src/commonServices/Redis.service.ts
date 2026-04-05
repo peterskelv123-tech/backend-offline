@@ -64,7 +64,7 @@ export class RedisService implements OnModuleDestroy {
     } else if (state == 'clear') {
       // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
       await this.client.hDel('attendance', studentId);
-      return;
+      return [];
     }
 
     // Save back to Redis
@@ -191,42 +191,17 @@ export class RedisService implements OnModuleDestroy {
 
   // ✅ Remove one student
   async removeStudent(studentId: string, examId?: number) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    const existingJson = await this.client.hGet('attendance', studentId);
-    if (!existingJson) return;
-
-    let attendanceList: any[] = [];
-    try {
-      const parsed = JSON.parse(existingJson);
-      attendanceList = Array.isArray(parsed) ? parsed : [];
-    } catch {
-      attendanceList = [];
-    }
-
     if (examId !== undefined) {
-      // Remove specific exam
-      attendanceList = attendanceList.filter(
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-        (entry) => entry.examId !== examId,
-      );
-    } else {
-      // Remove entire student
-      attendanceList = [];
+      const updated = await this.setAttendance(studentId, { examId }, 'remove');
+
+      if (!updated.length || updated.length === 0) {
+        await this.setAttendance(studentId, {}, 'clear');
+      }
+
+      return updated;
     }
 
-    if (attendanceList.length === 0) {
-      // Delete the student key entirely
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      await this.client.hDel('attendance', studentId);
-    } else {
-      // Save back remaining exams
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      await this.client.hSet(
-        'attendance',
-        studentId,
-        JSON.stringify(attendanceList),
-      );
-    }
+    return await this.setAttendance(studentId, {}, 'clear');
   }
 
   async removeManyStudents(studentIds: string[]) {
@@ -367,13 +342,8 @@ export class RedisService implements OnModuleDestroy {
 
     // If exam is fully finished, remove from attendance and delete progress
     if (finishedByTime || finishedByQuestions) {
-      await this.setAttendance(studentId, { examId }, 'remove');
-
-      // Correct Redis HDEL usage
-      const progressKey = `progress:${examId}:${studentId}`;
-      await this.client.del(progressKey);
-
-      return true;
+      const updated = await this.removeStudent(studentId, examId);
+      return !updated || updated.length === 0 ? true : false;
     }
 
     // Ensure all fields are defined (never write undefined to Redis!)

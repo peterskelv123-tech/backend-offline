@@ -7,6 +7,10 @@ export class MediasoupService implements OnModuleInit {
   private worker: mediasoup.types.Worker;
   private router: mediasoup.types.Router;
   private announcedIp: string;
+  private studentProducers = new Map<
+    string,
+    { audio?: string; video?: string }
+  >();
   private producerTransports = new Map<
     string,
     mediasoup.types.WebRtcTransport
@@ -75,14 +79,47 @@ export class MediasoupService implements OnModuleInit {
     const transport = this.producerTransports.get(transportId);
     if (!transport) throw new Error('Transport not found');
 
+    // ✅ Get existing producers for this student
+    const existing = this.studentProducers.get(studentId) || {};
+
+    // 🔥 If same kind exists → REMOVE it first
+    if (existing[kind]) {
+      const oldProducerId = existing[kind];
+      const old = this.producers.get(oldProducerId);
+
+      if (old) {
+        console.log(`♻️ Replacing ${kind} producer for student ${studentId}`);
+
+        try {
+          old.producer.close();
+        } catch (err) {
+          console.warn('⚠️ Error closing old producer:', err);
+        }
+
+        this.producers.delete(oldProducerId);
+      }
+    }
+
+    // ✅ Create new producer
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     const producer = await transport.produce({ kind, rtpParameters });
-
+    producer.on('@close', () => {
+      const entry = this.studentProducers.get(studentId);
+      if (entry && entry[kind] === producer.id) {
+        delete entry[kind];
+        this.studentProducers.set(studentId, entry);
+      }
+    });
+    // ✅ Save globally
     this.producers.set(producer.id, {
       producer,
       studentId,
       kind,
     });
+
+    // ✅ Update student mapping
+    existing[kind] = producer.id;
+    this.studentProducers.set(studentId, existing);
 
     return { producerId: producer.id };
   }
@@ -102,7 +139,7 @@ export class MediasoupService implements OnModuleInit {
         );
 
         try {
-          data.producer.close(); // 🔥 THIS IS THE REAL KILL SWITCH
+          data.producer.close();
         } catch (err) {
           console.warn('⚠️ Error closing producer:', producerId, err);
         }
@@ -110,6 +147,9 @@ export class MediasoupService implements OnModuleInit {
         this.producers.delete(producerId);
       }
     }
+
+    // ✅ IMPORTANT: remove student mapping
+    this.studentProducers.delete(studentId);
   }
   // -------------------- CONSUMER TRANSPORT --------------------
   async createConsumerTransport(): Promise<any> {

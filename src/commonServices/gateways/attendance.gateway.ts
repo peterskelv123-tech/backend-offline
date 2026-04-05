@@ -13,6 +13,7 @@ import { Server, Socket } from 'socket.io';
 import { RedisService } from 'src/commonServices/Redis.service';
 import { ExamServices } from 'src/examModule/exam.services';
 import { MediasoupService } from 'src/mediaSoup/mediaSoupService';
+import { AttendanceService } from '../AttendanceService';
 @WebSocketGateway({
   cors: { origin: '*' },
 })
@@ -24,6 +25,7 @@ export class AttendanceGateway {
     private redis: RedisService,
     private exam: ExamServices,
     private mediaSoup: MediasoupService,
+    private readonly attendanceService: AttendanceService,
   ) {}
   private studentSockets = new Map<string, Socket>();
   // ✅ Logs raw disconnect events from socket.io
@@ -53,69 +55,62 @@ export class AttendanceGateway {
   }
 
   // ✅ When a socket connects
-  handleConnection(client: Socket) {
-    console.log('Client connected:', client.id);
+handleConnection(client: Socket) {
+  const { studentId, admin } = client.handshake.auth;
+
+  if (studentId) {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+    client.data.studentId = studentId;
+    console.log("🎓 Student connected:", studentId);
   }
 
+  if (admin) {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+    client.data.admin = true;
+    console.log("👑 Admin connected");
+  }
+}
   // ✅ When a socket disconnects
 async handleDisconnect(client: Socket) {
-  const { studentId, admin, examId } = client.data || {};
+  // eslint-disable-next-line prefer-const
+  let { studentId, admin } = client.data || {};
   console.log('📤 handleDisconnect fired with data:', client.data);
-
-  // ===========================
-  // STUDENT DISCONNECT LOGIC
-  // ===========================
-  if (studentId && examId) {
-    // 1️⃣ Remove from in-memory socket map
-    const existed = this.studentSockets.delete(studentId);
-    if (existed) {
-      console.log(`❌ Student ${studentId} socket removed from map`);
-    } else {
-      console.log(`⚠️ Student ${studentId} socket not found in map`);
+ if (!studentId) {
+    for (const [id, socket] of this.studentSockets.entries()) {
+      if (socket.id === client.id) {
+        studentId = id;
+        break;
+      }
     }
-
-    // 2️⃣ Load exam using service
-    const exam = await this.exam.findOne(examId);
-    if (!exam) {
-      console.error(`❌ Exam with id ${examId} not found`);
-      return;
-    }
-    const totalQuestions = exam.totalQuestions;
-
-    // 3️⃣ Remove or mark inactive in Redis
-    const wasRemoved = await this.redis.removeStudentIfFinished(
-      studentId,
-      examId,
-      totalQuestions,
-    );
-    console.log(
-      wasRemoved
-        ? `🧹 Student ${studentId} removed — exam finished`
-        : `🛑 Student ${studentId} disconnected but can resume later`,
-    );
-
-    // 4️⃣ Update admin dashboard if online
-    if (await this.redis.isAdminOnline()) {
-      const snapshot = (await this.redis.getAttendanceSnapshot()).filter(
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-        (item) => item.active === true,
-      );
-      this.server.to('admin-room').emit('attendance-update', snapshot);
-    }
-
-    // 5️⃣ Notify admin this student left
-    this.server.to('admin-room').emit('student-left', { studentId });
   }
 
-  // ===========================
-  // ADMIN DISCONNECT LOGIC
-  // ===========================
+  console.log('📤 handleDisconnect resolved studentId:', studentId);
+  if (studentId) {
+  this.studentSockets.delete(studentId);
+
+  console.log(`🧹 Removing producers for ${studentId} (disconnect)`);
+  this.mediaSoup.removeProducersByStudent(studentId);
+
+  // ✅ NEW: tell admin media is gone
+  this.server.to('admin-room').emit('student-media-closed', {
+    studentId,
+  });
+
+  await this.reconcileStudentState(studentId);
+
+  if (await this.redis.isAdminOnline()) {
+    const snapshot = await this.buildEnrichedSnapshot();
+    this.server.to('admin-room').emit('attendance-update', snapshot);
+  }
+
+  this.server.to('admin-room').emit('student-left', { studentId });
+}
+
   if (admin) {
     console.log('🛑 Admin disconnected');
     await this.redis.setAdminOnline(false);
   }
 }
-
   // ✅ ADMIN JOIN DASHBOARD
   @SubscribeMessage('admin-join')
   async adminJoin(@ConnectedSocket() client: Socket) {
@@ -127,70 +122,21 @@ async handleDisconnect(client: Socket) {
     console.log('✅ Admin joined live monitor');
 
     // 1️⃣ Fetch all students in Redis
-    const snapshot = await this.redis.getAttendanceSnapshot();
-
-    // 2️⃣ Get real currently connected studentIds
     const connectedStudentIds = this.getConnectedStudents();
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access
-    const activeStudents = snapshot.filter((s) => connectedStudentIds.includes(s.studentId) && s.producerId);
-     for (const student of activeStudents) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access
-    const transport = await this.mediaSoup.createConsumerTransport();
-    client.emit('new-student-stream', {
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-      studentId: student.studentId,
-      transport,
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-      producerId: student.producerId,
-    });
-  }
-    // 3️⃣ Ghosts = in redis but not connected
-    const ghosts = snapshot
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-member-access
-      .map((s) => s.studentId)
-      .filter((id) => !connectedStudentIds.includes(id));
 
-    //console.log('👻 Ghost students:', ghosts);
+const snapshot = await this.redis.getAttendanceSnapshot();
 
-    // 4️⃣ Clean ghosts with helper
-    if (ghosts.length > 0) {
-      await Promise.all(
-        ghosts.map(async (studentId) => {
-          const studentExams = await this.redis.getStudent(studentId); // array of exams
-          if (!studentExams || !Array.isArray(studentExams)) return;
+const ghosts = snapshot
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-member-access
+  .map((s) => s.studentId)
+  .filter((id) => !connectedStudentIds.includes(id));
 
-          for (const examEntry of studentExams) {
-            // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-            const examId = examEntry.examId;
-            const exam = await this.exam.findOne(examId);
-            if (!exam) continue;
-
-            const totalQuestions = exam.totalQuestions;
-
-            const removed = await this.redis.removeStudentIfFinished(
-              studentId,
-              examId,
-              totalQuestions,
-            );
-
-            if (!removed) {
-              // mark only this exam inactive
-              await this.redis.setAttendance(studentId, {
-                ...examEntry,
-                active: false,
-              });
-            }
-          }
-        }),
-      );
-    }
+for (const studentId of ghosts) {
+  await this.reconcileStudentState(studentId);
+}
 
     // 5️⃣ Final accurate snapshot for admin
-    const finalSnapshot = (await this.redis.getAttendanceSnapshot()).filter(
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-      (it) => it.active,
-    );
-
+    const finalSnapshot = await this.buildEnrichedSnapshot();
     client.emit('attendance-snapshot', finalSnapshot);
   }
 
@@ -200,83 +146,45 @@ async handleDisconnect(client: Socket) {
 async studentJoin(@MessageBody() data, @ConnectedSocket() client) {
   const { examId, studentId } = data;
 
-  // Immediately register socket
   this.studentSockets.set(studentId, client);
-
-  // Mark student ID on socket
   // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
   client.data.studentId = studentId;
 
-  // Join exam-room
+  // 🔥 NEW: reset media when switching exam
+  this.mediaSoup.removeProducersByStudent(studentId);
+
+  this.server.to('admin-room').emit('student-media-closed', {
+    studentId,
+  });
+
+  await this.reconcileStudentState(studentId);
+
+  await this.redis.setAttendance(studentId, {
+    studentId,
+    examId,
+    active: true,
+  });
+
   // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
   client.join(`exam-${examId}`);
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+  client.join(`student-room-${studentId}`);
 
-   // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-   client.join(`student-room-${studentId}`);
-  // Save attendance in Redis
-  await this.redis.setAttendance(studentId, { studentId, examId, active: true });
-
-  // Notify admin if online
   if (await this.redis.isAdminOnline()) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-    const snapshot = (await this.redis.getAttendanceSnapshot()).filter(it => it.active);
-    const producers = this.mediaSoup.getAllProducers();
-    const enrichedSnapshot = snapshot.map((student) => {
-  const studentProducers = producers.filter(
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-    (p) => p.studentId === student.studentId,
-  );
+    const snapshot = await this.buildEnrichedSnapshot();
 
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-  return {
-    ...student,
-    producers: {
-      video: studentProducers.find((p) => p.kind === 'video')?.producerId,
-      audio: studentProducers.find((p) => p.kind === 'audio')?.producerId,
-    },
-  };
-});
-this.server.to('admin-room').emit('attendance-update', enrichedSnapshot);
+    this.server.to('admin-room').emit('attendance-update', snapshot);
+
+    this.server.to('admin-room').emit('student-switched-exam', {
+      studentId,
+      examId,
+    });
   }
 
   return { ok: true };
 }
 private async buildEnrichedSnapshot() {
-  const snapshot = (await this.redis.getAttendanceSnapshot()).filter(
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-    (it) => it.active,
-  );
-
-  const activeStudentIds = new Set(
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-member-access
-    snapshot.map((s) => s.studentId),
-  );
-
-  const producers = this.mediaSoup.getAllProducers();
-
-  // 🔥 CLEANUP: remove producers for inactive students
-  for (const p of producers) {
-    if (!activeStudentIds.has(p.studentId)) {
-      this.mediaSoup.removeProducersByStudent(p.studentId);
-    }
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-  return snapshot.map((student) => {
-    const studentProducers = producers.filter(
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-      (p) => p.studentId === student.studentId,
-    );
-
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-    return {
-      ...student,
-      producers: {
-        video: studentProducers.find((p) => p.kind === 'video')?.producerId,
-        audio: studentProducers.find((p) => p.kind === 'audio')?.producerId,
-      },
-    };
-  });
+  return this.attendanceService.buildEnrichedSnapshot();
 }  // ✅ STUDENT LIVE STATUS UPDATE
  @SubscribeMessage('student-status')
 async studentStatus(@MessageBody() data, @ConnectedSocket() client: Socket) {
@@ -304,138 +212,127 @@ async studentStatus(@MessageBody() data, @ConnectedSocket() client: Socket) {
     this.server.to('admin-room').emit('attendance-update', await this.buildEnrichedSnapshot());
   }
 }
+private async cleanupGhostStudents() {
+  const snapshot = await this.redis.getAttendanceSnapshot();
 
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-member-access
+  const redisStudentIds = snapshot.map((s) => s.studentId);
+
+  const connectedStudentIds = this.getConnectedStudents();
+
+  const ghosts = redisStudentIds.filter(
+    (id) => !connectedStudentIds.includes(id),
+  );
+
+  if (ghosts.length === 0) return;
+
+  //console.log(`👻 Cleaning ghost students:`, ghosts);
+
+  for (const studentId of ghosts) {
+    await this.reconcileStudentState(studentId);
+  }
+}
   // ✅ ADMIN STOPS ONE STUDENT
- @SubscribeMessage('admin-stop-exam')
+@SubscribeMessage('admin-stop-exam')
 async stopExam(@MessageBody() data: { studentId: string; examId: number }) {
   const { studentId, examId } = data;
-  console.log(`🛑 Admin requested to stop student ${studentId} for exam ${examId}`);
 
-  // 1️⃣ Get all exams for this student
-  const studentExams = await this.redis.getStudent(studentId);
-  if (!studentExams || !Array.isArray(studentExams)) {
-    console.log(`⚠️ No student found in Redis for ${studentId}`);
-    return;
-  }
+  console.log(`🛑 Admin stopping ${studentId} for exam ${examId}`);
 
-  // 2️⃣ Fetch the exam from DB
-  const exam = await this.exam.findOne(examId);
-  if (!exam) {
-    throw new Error('Student has no valid exam record for this examId');
-  }
-  const totalQuestions = exam.totalQuestions;
+  await this.redis.removeStudent(studentId, examId);
 
-  // 3️⃣ Remove exam if finished or mark inactive
-  await this.redis.removeStudentIfFinished(studentId, examId, totalQuestions);
+  await this.reconcileStudentState(studentId);
 
-  // 4️⃣ Emit force-stop to the student
-  const studentSocket = this.studentSockets.get(studentId);
+  // ✅ ONLY notify student
+  const socket = this.studentSockets.get(studentId);
 
-  if (studentSocket) {
-    console.log(`📡 Emitting force-stop to student ${studentId} via socket`);
-    studentSocket.emit('force-stop', { studentId, examId });
+  if (socket) {
+    socket.emit('force-stop', { studentId, examId });
   } else {
-    console.log(`⚠️ No active socket found for student ${studentId}, using backup room emit`);
-    // 🔹 Use dedicated private student room as backup
     this.server.to(`student-room-${studentId}`).emit('force-stop', { studentId, examId });
   }
 
-  // 5️⃣ Update admin dashboard
   if (await this.redis.isAdminOnline()) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
     const snapshot = await this.buildEnrichedSnapshot();
+    console.log('updated snapshot:',snapshot)
     this.server.to('admin-room').emit('attendance-update', snapshot);
   }
 
-  // 6️⃣ Notify admin
   this.server.to('admin-room').emit('student-stopped', { studentId, examId });
 }
+private async reconcileStudentState(studentId: string, timeLeft?: number) {
+  const studentExams = await this.redis.getStudent(studentId);
 
+  if (!studentExams || !Array.isArray(studentExams)) {
+    return { remaining: [], isFullyInactive: true };
+  }
 
-  // ✅ STUDENT LEAVES EXPLICITLY (submit)
+  for (const exam of studentExams) {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access
+    const examDetail = await this.exam.findOne(exam.examId);
+    if (!examDetail) continue;
 
-  @SubscribeMessage('student-leave')
-  async handleStudentLeave(
-    @MessageBody() data: { studentId: string; timeLeft: number },
-    @ConnectedSocket() client: Socket,
-  ) {
-    const { studentId, timeLeft } = data;
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-    client.data.studentId = studentId;
+    const totalQuestions = examDetail.totalQuestions;
 
-    console.log(`👋 Student-leave received for ${studentId}`);
+    const finished = await this.redis.removeStudentIfFinished(
+      studentId,
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access
+      exam.examId,
+      totalQuestions,
+    );
 
-    // 1️⃣ Fetch all exams for this student
-    const studentExams = await this.redis.getStudent(studentId);
-    if (studentExams && Array.isArray(studentExams)) {
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-      const updatedExams = studentExams.map((exam) => ({
+    if (!finished) {
+      await this.redis.setAttendance(studentId, {
         ...exam,
         active: false,
         // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
         timeLeft: exam.timeLeft ?? timeLeft,
-      }));
-      // Save back all entries
-    Promise.all(
-      updatedExams.map(async (exam) => {
-        await this.redis.setAttendance(studentId, exam);
-      }),
-    );
+      });
     }
-    // 2️⃣ Get fresh snapshot from Redis
-    const snapshot = await this.redis.getAttendanceSnapshot();
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-member-access
-    const redisStudentIds = snapshot.map((s) => s.studentId);
-
-    // 3️⃣ Get connected student IDs from sockets
-    const connectedStudentIds = this.getConnectedStudents();
-
-    // 4️⃣ Determine ghost users: exist in Redis but socket not active
-    const ghosts = redisStudentIds.filter(
-      (id) => !connectedStudentIds.includes(id),
-    );
-
-    // 5️⃣ Mark all ghosts inactive (batch update)
-    if (ghosts.length > 0) {
-     await Promise.all(
-  ghosts.map(async (id) => {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-    const idDetails = snapshot.find((it) => it.studentId === id);
-    const exams = await this.redis.getStudent(id);
-
-    if (exams && Array.isArray(exams)) {
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-      const updated = exams.map((e) => ({
-        ...e,
-        active: false,
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-        timeLeft: e.timeLeft ?? idDetails.timeLeft ?? 0,
-      }));
-
-      // SAVE EACH EXAM, NOT THE ARRAY
-      await Promise.all(
-        updated.map((exam) => this.redis.setAttendance(id, exam))
-      );
-    }
-  })
-);
-      //console.log(`👻 Marked ghost students inactive:`, ghosts);
-    }
-
-    // 6️⃣ Prepare final cleaned snapshot
-    const finalSnapshot = await this.buildEnrichedSnapshot();
-
-    // 7️⃣ If admin is online, send cleaned snapshot
-    if (await this.redis.isAdminOnline()) {
-      this.server.to('admin-room').emit('attendance-update', finalSnapshot);
-    }
-
-    // 8️⃣ Notify admin specifically that this student left
-    this.server.to('admin-room').emit('student-left', { studentId });
-
-    // 9️⃣ Disconnect socket
-    client.disconnect();
-
-    return { ok: true };
   }
+
+  const remaining = await this.redis.getStudent(studentId);
+
+  return {
+    remaining: remaining ?? [],
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+    isFullyInactive: !remaining || remaining.length === 0,
+  };
+}
+
+  // ✅ STUDENT LEAVES EXPLICITLY (submit)
+
+@SubscribeMessage('student-leave')
+async handleStudentLeave(
+  @MessageBody() data: { studentId: string; timeLeft: number, examId: number },
+  @ConnectedSocket() client: Socket,
+) {
+  const { studentId, timeLeft, examId } = data;
+
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+  client.data.studentId = studentId;
+
+  console.log(`👋 Student-leave received for ${examId}`);
+await this.redis.removeStudent(studentId, examId);
+  await this.reconcileStudentState(studentId, timeLeft);
+this.mediaSoup.removeProducersByStudent(studentId);
+
+this.server.to('admin-room').emit('student-media-closed', {
+  studentId,
+});
+  await this.cleanupGhostStudents();
+
+  if (await this.redis.isAdminOnline()) {
+    const finalSnapshot = await this.buildEnrichedSnapshot();
+    this.server.to('admin-room').emit('attendance-update', finalSnapshot);
+  }
+
+  this.server.to('admin-room').emit('student-left', { studentId });
+
+  // ✅ Let frontend decide to disconnect OR keep alive
+  // ❌ DO NOT force disconnect unless necessary
+  // client.disconnect();
+
+  return { ok: true };
+}
 }

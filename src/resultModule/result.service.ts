@@ -218,15 +218,15 @@ async downloadResultPdf(
   // ✅ Table headers
   let y = height - 120;
   page.drawText("Full Name", { x: COL_REGNO, y, size: 12, font:boldFont });
-  page.drawText("Score", { x: COL_SCORE, y, size: 12, font:boldFont });
   page.drawText("Highest Score", { x: COL_HIGHEST, y, size: 12, font:boldFont });
+  page.drawText("Score", { x: COL_SCORE, y, size: 12, font:boldFont });
   y -= 18;
 
   // ✅ Table rows
   for (const r of results) {
     page.drawText(r.regNo, { x: COL_REGNO, y, size: 11, font });
-    page.drawText(String(r.score), { x: COL_SCORE, y, size: 11, font });
     page.drawText(String(r.highestScorePossible), { x: COL_HIGHEST, y, size: 11, font });
+    page.drawText(String(r.score), { x: COL_SCORE, y, size: 11, font });
     y -= 16;
 
     // ✅ Pagination (A4 landscape height-aware)
@@ -239,7 +239,4 @@ async downloadResultPdf(
 
   return Buffer.from(await pdfDoc.save());
 }
-
-
-
 }

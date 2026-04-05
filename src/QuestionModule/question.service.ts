@@ -101,23 +101,23 @@ private parseQuestions(text: string) {
 
   // 2️⃣ Split by ANSWER (this is the key)
   const chunks = normalized.split(
-    /(?:Answer|Correct Answer|Ans)\s*[:\-]?\s*[A-E]/gi
-  );
+  /(?:Answer|Correct Answer|Ans)\s*[:\-]?\s*(?:[A-E]|\d+)/gi
+);
 
   // 3️⃣ Extract answer letters separately
   const answers = [...normalized.matchAll(
-    /(Answer|Correct Answer|Ans)\s*[:\-]?\s*([A-E])/gi
-  )].map(m => m[2].toUpperCase());
+  /(Answer|Correct Answer|Ans)\s*[:\-]?\s*([A-E]|\d+)/gi
+)].map(m => m[2].toUpperCase());
 
   chunks.forEach((chunk, index) => {
     const clean = chunk
-      .replace(/^\d+\.\s*/, '')
-      .trim();
+  .replace(/^\s*\d+\.\s*/, '') // ✅ handles spaces/newlines
+  .trim();
 
     if (!clean) return;
 
     const optionMatches = [...clean.matchAll(
-      /([A-E])[.)]\s*(.+?)(?=[A-E][.)]|$)/gs
+      /([A-E])[.)]\s*([\s\S]*?)(?=\n[A-E][.)]|\nAnswer|$)/g
     )];
 
     if (optionMatches.length < 2) return;
@@ -132,11 +132,19 @@ private parseQuestions(text: string) {
     if (!question) return;
 
     let correctAnswer = '';
-    const letter = answers[index];
-    if (letter) {
-      const idx = letter.charCodeAt(0) - 65;
-      if (options[idx]) correctAnswer = options[idx];
-    }
+const answer = answers[index];
+
+if (answer) {
+  // Case 1: A–E
+  if (/^[A-E]$/.test(answer)) {
+    const idx = answer.charCodeAt(0) - 65;
+    if (options[idx]) correctAnswer = options[idx];
+  } 
+  // Case 2: numeric answer (direct match)
+  else {
+    correctAnswer = answer;
+  }
+}
 
     questions.push({
       question,
@@ -144,7 +152,7 @@ private parseQuestions(text: string) {
       correctAnswer,
     });
   });
-
+  console.log("TOTAL PARSED:", questions.length);
   return questions;
 }
 
@@ -221,7 +229,7 @@ async extractDocxWithFormulas(filePath: string) {
     const placeholder = `{{FORMULA_${++formulaIndex}}}`;
 
     // TEMP: store raw XML for now
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-base-to-string
     formulas[placeholder] = mathNodes[i].toString();
 
     // Replace math node with placeholder text

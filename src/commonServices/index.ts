@@ -7,6 +7,7 @@ import { ExamModule } from 'src/examModule';
 import { RedisController } from './redis.controller';
 import { MediasoupService } from '../mediaSoup/mediaSoupService';
 import { MediaGateway } from './gateways/media.gateway';
+import { AttendanceService } from './AttendanceService';
 @Global()
 @Module({
   imports: [ExamModule],
@@ -16,6 +17,7 @@ import { MediaGateway } from './gateways/media.gateway';
     DatabaseHealthService,
     RedisService,
     MediasoupService,
+    AttendanceService,
     AttendanceGateway,
     MediaGateway,
   ],
@@ -23,6 +25,7 @@ import { MediaGateway } from './gateways/media.gateway';
     ResponseService,
     DatabaseHealthService,
     RedisService,
+    AttendanceService,
     AttendanceGateway,
     MediaGateway,
   ],
